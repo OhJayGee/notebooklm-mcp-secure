@@ -11,6 +11,34 @@ import type { Icon, Resource } from "@modelcontextprotocol/sdk/types.js";
 import { NotebookLibrary } from "../library/notebook-library.js";
 import { log } from "../utils/logger.js";
 import { validateNotebookId } from "../utils/security.js";
+import { authenticateMCPRequest } from "../auth/mcp-auth.js";
+
+/**
+ * Extract the bearer token from a JSON-RPC request's `_meta` block in
+ * the same way the tool dispatcher does, then run the read-scope auth
+ * check. Throws a JSON-RPC-friendly error on rejection (the MCP SDK
+ * surfaces thrown errors as protocol errors with a sanitised message).
+ *
+ * Resource reads are read-only by definition — the policy is read-
+ * scope, not admin. When global auth is disabled
+ * (`NLMCP_AUTH_DISABLED=true`) the check passes through.
+ */
+async function assertReadScopeAuthorized(
+  requestParams: unknown,
+  handlerLabel: string,
+): Promise<void> {
+  const meta = (requestParams as { _meta?: { authToken?: string } } | undefined)?._meta;
+  const token = meta?.authToken || process.env.NLMCP_AUTH_TOKEN;
+
+  const authResult = await authenticateMCPRequest(token, handlerLabel, false, "read");
+  if (!authResult.authenticated) {
+    log.warning(`🔒 [MCP] Authentication failed for resource handler: ${handlerLabel}`);
+    // Throwing surfaces as a JSON-RPC error response. The SDK serialises
+    // `Error.message` into the response body; the message is sanitised
+    // and does not include any caller-supplied path data.
+    throw new Error(authResult.error || "Authentication required");
+  }
+}
 
 /**
  * Create an SVG icon data URI
@@ -77,6 +105,7 @@ export class ResourceHandlers {
     // List available resources (enhanced with icons and annotations)
     server.setRequestHandler(ListResourcesRequestSchema, async (request) => {
       log.info("📚 [MCP] list_resources request received");
+      await assertReadScopeAuthorized(request.params, "resources/list");
       const { limit } = (request.params ?? {}) as ListResourcesParams;
       const effectiveLimit = Math.min(
         Math.max(limit ?? DEFAULT_RESOURCE_LIMIT, 1),
@@ -154,8 +183,9 @@ export class ResourceHandlers {
     });
 
     // List resource templates
-    server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => {
+    server.setRequestHandler(ListResourceTemplatesRequestSchema, async (request) => {
       log.info("📑 [MCP] list_resource_templates request received");
+      await assertReadScopeAuthorized(request.params, "resources/templates/list");
 
       return {
         resourceTemplates: [
@@ -176,6 +206,7 @@ export class ResourceHandlers {
     server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
       const { uri } = request.params;
       log.info(`📖 [MCP] read_resource request: ${uri}`);
+      await assertReadScopeAuthorized(request.params, "resources/read");
 
       // Handle library resource
       if (uri === "notebooklm://library") {
@@ -309,6 +340,7 @@ export class ResourceHandlers {
 
     // Argument completions (for prompt arguments and resource templates)
     server.setRequestHandler(CompleteRequestSchema, async (request) => {
+      await assertReadScopeAuthorized(request.params, "completion/complete");
       const { ref, argument } = request.params as CompletionRequestParams;
       try {
         if (ref?.type === "ref/resource") {
@@ -327,8 +359,9 @@ export class ResourceHandlers {
     });
 
     // List available prompts
-    server.setRequestHandler(ListPromptsRequestSchema, async () => {
+    server.setRequestHandler(ListPromptsRequestSchema, async (request) => {
       log.info("📝 [MCP] list_prompts request received");
+      await assertReadScopeAuthorized(request.params, "prompts/list");
 
       return {
         prompts: [
@@ -364,6 +397,7 @@ export class ResourceHandlers {
     server.setRequestHandler(GetPromptRequestSchema, async (request) => {
       const { name } = request.params;
       log.info(`📝 [MCP] get_prompt request: ${name}`);
+      await assertReadScopeAuthorized(request.params, "prompts/get");
 
       switch (name) {
         case "notebooklm.auth-setup":

@@ -318,6 +318,28 @@ export function getSecureGeminiApiKey(): SecureCredential | null {
 }
 
 /**
+ * Wipe all module-level SecureCredential holders. Called from the
+ * shutdown handler so that long-lived process memory does not retain
+ * the plaintext credentials past the point at which the server is
+ * still using them.
+ *
+ * The SecureCredential class auto-wipes after its TTL expires, but the
+ * TTL (5 minutes by default) is much shorter than a typical server
+ * lifetime — this is the OTHER end of the lifecycle, the explicit
+ * teardown that AGENTS.md mandates on shutdown.
+ *
+ * Safe to call more than once: SecureCredential.wipe is idempotent.
+ */
+export function wipeGlobalCredentials(): void {
+  if (secureLoginPassword && !secureLoginPassword.isWiped()) {
+    secureLoginPassword.wipe();
+  }
+  if (secureGeminiApiKey && !secureGeminiApiKey.isWiped()) {
+    secureGeminiApiKey.wipe();
+  }
+}
+
+/**
  * Build final configuration
  * Priority: Defaults → Environment Variables → Tool Parameters (at runtime)
  * No config.json files - everything via ENV or tool parameters!

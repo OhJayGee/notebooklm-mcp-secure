@@ -53,7 +53,7 @@ import { ToolHandlers, buildToolDefinitions } from "./tools/index.js";
 import { ResourceHandlers } from "./resources/resource-handlers.js";
 import { SettingsManager } from "./utils/settings-manager.js";
 import { CliHandler } from "./utils/cli-handler.js";
-import { CONFIG, ensureDirectories } from "./config.js";
+import { CONFIG, ensureDirectories, wipeGlobalCredentials } from "./config.js";
 import { log } from "./utils/logger.js";
 import { audit, getAuditLogger } from "./utils/audit-logger.js";
 import { checkSecurityContext } from "./utils/security.js";
@@ -196,6 +196,27 @@ const TOOLS_REQUIRING_AUTH = new Set<ToolName>([
   "report_security_incident",
   "collect_audit_evidence",
   "generate_compliance_report",
+]);
+
+/**
+ * Compliance tools that are NOT in TOOL_NAMES but still require admin
+ * scope because they mutate state, write to disk, or dispatch outbound
+ * traffic. The auth gate in the request handler consults this set
+ * separately from `TOOLS_REQUIRING_AUTH` (which is keyed on `ToolName`,
+ * a compile-time literal that excludes the compliance set).
+ *
+ * Triage rationale per tool:
+ *   - run_health_check: writes `.health_check` to disk, logs a
+ *     compliance event, and may dispatch outbound alert webhooks.
+ *     Definitely admin.
+ *   - verify_audit_log_integrity: read-only verification of the log;
+ *     read-scope is fine.
+ *   - compliance_dashboard / compliance_score / list_evidence_packages
+ *     / verify_evidence_integrity / get_consent_status /
+ *     get_incident_status / list_policies / get_policy: all read-only.
+ */
+const COMPLIANCE_TOOLS_REQUIRING_AUTH = new Set<string>([
+  "run_health_check",
 ]);
 
 const ADVANCED_TOOLS = new Set<ToolName>([
@@ -433,7 +454,15 @@ export class NotebookLMMCPServer {
       // Tools that touch the filesystem, wipe credentials, dispatch outbound
       // HTTP, delete remote resources, or exercise GDPR data-subject rights
       // always require auth, even if globally disabled via NLMCP_AUTH_DISABLED.
-      const requiresAuth = isToolName(name) && TOOLS_REQUIRING_AUTH.has(name);
+      //
+      // Compliance tools live in their own dispatch path (see
+      // complianceToolNames below) and are NOT in TOOL_NAMES; the
+      // COMPLIANCE_TOOLS_REQUIRING_AUTH set lists the ones that mutate
+      // state and so must also force-admin even though they don't pass
+      // through `isToolName`.
+      const requiresAuth =
+        (isToolName(name) && TOOLS_REQUIRING_AUTH.has(name)) ||
+        COMPLIANCE_TOOLS_REQUIRING_AUTH.has(name);
 
       const authResult = requiresAuth
         ? await authenticateMCPRequest(authToken, name, true, "admin")
@@ -605,10 +634,23 @@ export class NotebookLMMCPServer {
         // Close server
         await this.server.close();
 
+        // Wipe module-level SecureCredential holders so plaintext
+        // LOGIN_PASSWORD / GEMINI_API_KEY do not survive past the point
+        // the server is still using them. Per AGENTS.md credential
+        // lifecycle rules, .wipe() must be reachable on every shutdown
+        // path — this satisfies that on SIGINT, SIGTERM, uncaught
+        // exception, and unhandled rejection (all four flow through
+        // `shutdown()`). Done last so any concurrent in-flight
+        // requests have already been drained.
+        wipeGlobalCredentials();
+
         log.success("✅ Shutdown complete");
         process.exit(0);
       } catch (error) {
         log.error(`❌ Error during shutdown: ${error}`);
+        // Still wipe credentials on the error path — a partially-
+        // failed shutdown is the worst time to leak them.
+        try { wipeGlobalCredentials(); } catch { /* best effort */ }
         process.exit(1);
       }
     };
