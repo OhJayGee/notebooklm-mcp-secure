@@ -22,6 +22,32 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
+      # Lockfile drift detection. `npm ci` is supposed to be idempotent
+      # against package-lock.json — if `git diff` shows a change, either
+      # the lockfile and package.json are out of sync, or something in
+      # the install resolved differently than the committed lockfile
+      # claims. Either case is a supply-chain risk worth failing on.
+      - name: Lockfile drift check
+        run: git diff --exit-code -- package-lock.json
+
+      # Verify every installed package has a valid registry signature.
+      # Catches a compromised mirror, tampered tarball, or maintainer-key
+      # compromise before the dep gets baked into a build. Requires npm 9.5+.
+      - name: Verify package signatures (Sigstore)
+        run: npm audit signatures
+
+      # Vulnerability ratchet. Fails the build on any known high or
+      # critical CVE in the dependency tree. Moderate/low are surfaced
+      # but do not block (those are routinely false-positive-heavy).
+      - name: npm audit (fail on high)
+        run: npm audit --audit-level=high
+
+      # Pin enforcement: refuse to build if any direct dep in package.json
+      # uses a range specifier (^, ~, >=, latest). Prevents drift away from
+      # the reviewed-tarball pin strategy. No GitHub event inputs used.
+      - name: Enforce exact-version pins
+        run: node ./scripts/check-exact-pins.cjs
+
       - name: Build (TypeScript)
         run: npm run build
 
