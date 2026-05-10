@@ -123,20 +123,54 @@ function classifyToolError(error: unknown): ToolErrorType {
     : "domain";
 }
 
+// Tools that are safe to expose to a read-scope token: they read state,
+// answer questions, list, and otherwise have no persistent or remote
+// side effect.
+//
+// Anything that mutates the local library, mutates remote NotebookLM
+// state (creating/editing notebooks, adding/removing sources, generating
+// audio/video, mutating the quota), or writes to the local filesystem
+// MUST be in TOOLS_REQUIRING_AUTH below — read-scope is for "look at
+// state" only.
 const TOOLS_EXEMPT_FROM_AUTH = new Set<ToolName>([
-  "ask_question", "add_notebook", "list_notebooks", "get_notebook", "select_notebook",
-  "update_notebook", "remove_notebook", "search_notebooks", "get_library_stats",
-  "get_quota", "set_quota_tier", "get_project_info", "create_notebook",
-  "batch_create_notebooks", "sync_library", "list_sessions", "close_session", "reset_session",
-  "get_health", "list_sources", "add_source", "remove_source",
-  "generate_audio_overview", "get_audio_status", "generate_video_overview", "get_video_status",
-  "generate_data_table", "get_data_table", "list_webhooks",
+  "ask_question",
+  "list_notebooks", "get_notebook", "search_notebooks", "get_library_stats",
+  "get_quota", "get_project_info",
+  "list_sessions", "get_health",
+  "list_sources",
+  "get_audio_status", "get_video_status", "get_data_table",
+  "list_webhooks",
   "deep_research", "gemini_query", "get_research_status",
   "query_document", "list_documents", "query_chunked_document",
   "get_query_history", "get_notebook_chat_history",
 ]);
 
+// Tools that require admin-scope auth even when global auth is disabled.
+// Includes anything that mutates persistent state, makes outbound HTTP,
+// touches the filesystem, or has remote side effects on Google services.
 const TOOLS_REQUIRING_AUTH = new Set<ToolName>([
+  // Local library mutation (URLs persisted here are later trusted by
+  // session-manager / browser navigation — they are a privilege boundary).
+  "add_notebook",
+  "update_notebook",
+  "remove_notebook",
+  "select_notebook",
+  // Remote / browser side effects: creating notebooks, mutating sources,
+  // generating audio/video/tables.
+  "create_notebook",
+  "batch_create_notebooks",
+  "sync_library",
+  "add_source",
+  "remove_source",
+  "generate_audio_overview",
+  "generate_video_overview",
+  "generate_data_table",
+  // Quota mutation — affects rate-limit decisions for every tool.
+  "set_quota_tier",
+  // Session lifecycle mutation.
+  "close_session",
+  "reset_session",
+  // Filesystem reads/writes and outbound HTTP.
   "add_folder",
   "cleanup_data",
   "export_library",
@@ -401,18 +435,24 @@ export class NotebookLMMCPServer {
         : await authenticateMCPRequest(authToken, name, false, "read");
       if (!authResult.authenticated) {
         log.warning(`🔒 [MCP] Authentication failed for tool: ${name}`);
+        // Match the I095/I330 error response contract: include data: null
+        // so callers (including tests) can rely on a uniform shape across
+        // success and failure paths.
+        const authErrorBody = {
+          success: false,
+          data: null,
+          error: authResult.error || "Authentication required",
+          _errorType: "domain" as const,
+        };
         return {
           isError: true,
           content: [
             {
               type: "text",
-              text: JSON.stringify({
-                success: false,
-                error: authResult.error || "Authentication required",
-                _errorType: "domain",
-              }),
+              text: JSON.stringify(authErrorBody),
             },
           ],
+          structuredContent: authErrorBody,
         };
       }
 
