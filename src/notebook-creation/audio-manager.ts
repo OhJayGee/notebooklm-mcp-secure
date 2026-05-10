@@ -10,6 +10,7 @@ import { AuthManager } from "../auth/auth-manager.js";
 import { SharedContextManager } from "../session/shared-context-manager.js";
 import { log } from "../utils/logger.js";
 import { randomDelay } from "../utils/stealth-utils.js";
+import { validateNotebookLMMediaUrl } from "../utils/url-validation.js";
 import fs from "fs";
 import path from "path";
 
@@ -378,6 +379,26 @@ export class AudioManager {
         process.env.HOME || process.env.USERPROFILE || ".",
         `notebooklm-audio-${Date.now()}.mp3`
       );
+
+      // Validate the scraped URL before navigating the authenticated
+      // browser context to it. The URL came from `page.evaluate(...)`
+      // scraping a download-button href or audio src — a prompt-
+      // injection chain through a source document the user added to
+      // the notebook can plant arbitrary `<a download href="...">` or
+      // `<audio src="...">` elements. Without this gate, `page.goto`
+      // would navigate the authenticated session to attacker-chosen
+      // URIs, including file:///etc/passwd (LFR via response.body())
+      // or https://169.254.169.254/ (cloud-metadata SSRF).
+      try {
+        validateNotebookLMMediaUrl(downloadInfo.url);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        log.error(`  ❌ Refusing to download audio from untrusted URL: ${reason}`);
+        return {
+          success: false,
+          error: `Audio download refused: ${reason}`,
+        };
+      }
 
       // Download the file using the page context
       const response = await page.goto(downloadInfo.url);

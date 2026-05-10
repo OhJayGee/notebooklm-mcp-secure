@@ -286,7 +286,13 @@ export class AuditLogger {
   }
 
   /**
-   * Write event to log file
+   * Write event to log file.
+   *
+   * The event passed in MUST NOT yet have its `previousHash` or `hash`
+   * fields populated — both are stamped inside `flushEvent` under the
+   * file lock, so that concurrent log() calls receive correctly
+   * chained hashes rather than two events both pointing at the same
+   * stale `this.previousHash`.
    */
   private async writeEvent(event: AuditEvent): Promise<void> {
     this.pendingEvents.push(event);
@@ -296,13 +302,25 @@ export class AuditLogger {
     await this.writeQueue;
   }
 
+  /**
+   * Stamp the chain link AND write the event under the per-day file
+   * lock. Pre-fix, `previousHash` was captured in `log()` before this
+   * function ran, so two concurrent `log()` calls would both see
+   * `previousHash = "GENESIS"` and the resulting hashes would branch
+   * rather than chain — `verifyIntegrity()` then reported a chain
+   * break on the next read.
+   *
+   * Post-fix: `event.previousHash` and `event.hash` are populated
+   * here, inside the `withLock` critical section, AFTER reading the
+   * latest `this.previousHash`. The serialisation invariant is the
+   * same one `withLock` already provided for the file write.
+   */
   private async flushEvent(event: AuditEvent): Promise<void> {
     if (!this.pendingEvents.includes(event)) {
       return;
     }
 
     const logFile = this.getLogFilePathForTimestamp(event.timestamp);
-    const line = `${JSON.stringify(event)}\n`;
 
     try {
       await withLock(logFile, async () => {
@@ -310,7 +328,21 @@ export class AuditLogger {
           return;
         }
 
+        // Stamp the chain link inside the lock so two concurrent
+        // log() calls produce events whose `previousHash` reflects
+        // the actual write order, not the order of the now-asynchronous
+        // log() invocations.
+        if (this.config.hashChainEnabled) {
+          event.previousHash = this.previousHash;
+          // Recompute the hash with the freshly-stamped previousHash.
+          // Strip event.hash before hashing so we never include a
+          // stale value.
+          const { hash: _stale, ...eventWithoutHash } = event;
+          event.hash = this.computeHash(eventWithoutHash);
+        }
+
         this.currentLogFile = logFile;
+        const line = `${JSON.stringify(event)}\n`;
         appendFileSecure(logFile, line, PERMISSION_MODES.OWNER_READ_WRITE);
         this.pendingEvents = this.pendingEvents.filter((pendingEvent) => pendingEvent !== event);
         // Advance the chain pointer only after the write physically succeeds (I228)
@@ -355,26 +387,22 @@ export class AuditLogger {
       ? this.sanitizeDetails(details)
       : {};
 
-    const eventWithoutHash: Omit<AuditEvent, "hash"> = {
+    // Build the event with placeholder previousHash and hash. The
+    // chain link is stamped inside flushEvent under withLock, so that
+    // concurrent log() calls produce a correctly-linked chain rather
+    // than two events whose previousHash both refer to the same stale
+    // pointer.
+    const event: AuditEvent = {
       timestamp: new Date().toISOString(),
       eventType,
       eventName,
       success,
       duration_ms,
       details: sanitizedDetails,
-      previousHash: this.config.hashChainEnabled ? this.previousHash : "",
+      previousHash: "",
+      hash: "",
     };
 
-    const hash = this.config.hashChainEnabled
-      ? this.computeHash(eventWithoutHash)
-      : "";
-
-    const event: AuditEvent = {
-      ...eventWithoutHash,
-      hash,
-    };
-
-    // previousHash is updated inside flushEvent after the write succeeds (I228)
     await this.writeEvent(event);
   }
 
