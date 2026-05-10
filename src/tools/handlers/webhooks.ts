@@ -7,7 +7,7 @@
 import type { HandlerContext } from "./types.js";
 import type { ToolResult } from "../../types.js";
 import { log } from "../../utils/logger.js";
-import { getWebhookDispatcher, type WebhookConfig, type WebhookStats } from "../../webhooks/index.js";
+import { getWebhookDispatcher, type WebhookConfig, type WebhookConfigPublic, type WebhookStats } from "../../webhooks/index.js";
 import type { EventType } from "../../events/event-types.js";
 import { getSanitizedErrorMessage } from "./error-utils.js";
 
@@ -70,14 +70,25 @@ export async function handleConfigureWebhook(
 export async function handleListWebhooks(
   _ctx: HandlerContext,
 ): Promise<ToolResult<{
-  webhooks: WebhookConfig[];
+  webhooks: WebhookConfigPublic[];
   stats: WebhookStats;
 }>> {
   log.info(`🔧 [TOOL] list_webhooks called`);
 
   try {
     const dispatcher = getWebhookDispatcher();
-    const webhooks = dispatcher.listWebhooks();
+    // Wait for env-driven init so a fresh start that immediately
+    // calls list_webhooks observes any NLMCP_WEBHOOK_URL configured
+    // webhooks. Pre-fix this could race and return an empty array
+    // even when env-configured webhooks were about to land.
+    await dispatcher.whenInitialized();
+
+    // Return the redacted public DTO, never the full WebhookConfig.
+    // Slack / Discord / Teams URLs embed secret tokens in the URL
+    // path; handing the full URL back to a read-scope MCP caller is
+    // equivalent to handing them the secret. listWebhooksPublic()
+    // returns just the host plus a `hasSecret` boolean.
+    const webhooks = dispatcher.listWebhooksPublic();
     const stats = dispatcher.getStats();
 
     log.success(`✅ [TOOL] list_webhooks completed (${webhooks.length} webhooks)`);

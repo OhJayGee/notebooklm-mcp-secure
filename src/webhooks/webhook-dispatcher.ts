@@ -19,6 +19,7 @@ import { SecureCredential } from "../utils/secure-memory.js";
 import { getMetricsRegistry } from "../observability/metrics.js";
 import type {
   WebhookConfig,
+  WebhookConfigPublic,
   WebhookDelivery,
   WebhookStats,
   AddWebhookInput,
@@ -197,6 +198,14 @@ export class WebhookDispatcher {
   private webhookSecrets = new Map<string, SecureCredential>();
   // Serialises saveStore() writes so concurrent addWebhook/removeWebhook don't interleave (I277)
   private saveQueue: Promise<void> = Promise.resolve();
+  /**
+   * Resolves once env-driven webhook initialisation has completed (DNS
+   * lookups for NLMCP_WEBHOOK_URL etc. are async). Held so dispatch /
+   * listWebhooks / addWebhook can `await` it and avoid a race where an
+   * event fires before the env-configured webhooks are actually in the
+   * in-memory store.
+   */
+  private initFromEnvPromise: Promise<void>;
 
   constructor() {
     this.storePath = path.join(CONFIG.dataDir, "webhooks.json");
@@ -205,26 +214,80 @@ export class WebhookDispatcher {
     this.loadDeliveryHistory();
     this.subscribeToEvents();
 
-    // Env-driven webhook init is async (URL validation calls dns.lookup);
-    // fire and forget — webhooks registered from env appear after the
-    // promise resolves. Constructor invariants (listWebhooks, dispatch with
-    // existing stored webhooks) are preserved.
-    void this.initializeFromEnv().catch((err) =>
-      log.warning(`WebhookDispatcher env init failed: ${err instanceof Error ? err.message : String(err)}`),
-    );
+    // Env-driven webhook init is async (URL validation calls dns.lookup).
+    // Hold the promise so callers can `await` it before observing
+    // listWebhooks() / dispatching events — pre-fix this was a fire-
+    // and-forget that could race with the very first event.
+    this.initFromEnvPromise = this.initializeFromEnv().catch((err) => {
+      log.warning(`WebhookDispatcher env init failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
 
     log.info("🔔 WebhookDispatcher initialized");
     log.info(`  Webhooks: ${this.store.webhooks.filter((w) => w.enabled).length} active`);
   }
 
   /**
-   * Load webhooks from disk
+   * Public hook so external callers can wait for env-driven init to
+   * settle before observing the in-memory store. Mostly useful in
+   * tests and during server bootstrap; production dispatch / listing
+   * paths await this internally.
+   */
+  async whenInitialized(): Promise<void> {
+    await this.initFromEnvPromise;
+  }
+
+  /**
+   * Load webhooks from disk.
+   *
+   * Legacy `secret` field migration: pre-fix releases of this file
+   * sometimes wrote the webhook secret directly into webhooks.json
+   * (the inconsistency between addWebhook and updateWebhook in
+   * v2026.3.3). On load we move any persisted `secret` value into
+   * the in-memory `webhookSecrets` SecureCredential map and scrub
+   * the field from the persisted record. The cleaned store is
+   * re-persisted so subsequent loads see no plaintext secrets.
+   *
+   * The migration is idempotent: an already-clean record (secret ===
+   * undefined) flows through untouched.
    */
   private loadStore(): WebhooksStore {
     try {
       if (fs.existsSync(this.storePath)) {
         const data = fs.readFileSync(this.storePath, "utf-8");
-        return JSON.parse(data);
+        const parsed: WebhooksStore = JSON.parse(data);
+
+        let migrationOccurred = false;
+        for (const w of parsed.webhooks ?? []) {
+          // Cast to escape the TS-typed-as-undefined assumption — we are
+          // explicitly checking the runtime value migrated from older
+          // releases.
+          const legacySecret = (w as { secret?: string }).secret;
+          if (typeof legacySecret === "string" && legacySecret.length > 0) {
+            this.webhookSecrets.set(
+              w.id,
+              new SecureCredential(legacySecret, WEBHOOK_SECRET_TTL_MS),
+            );
+            (w as { secret?: string }).secret = undefined;
+            migrationOccurred = true;
+          }
+        }
+
+        if (migrationOccurred) {
+          log.warning(
+            "🔐 Migrated legacy webhook.secret values from disk into in-memory SecureCredential map; scrubbed file.",
+          );
+          // Best-effort: re-persist the cleaned store. If this fails,
+          // the in-memory state is still correct; next save will
+          // converge.
+          try {
+            const cleaned = JSON.stringify(parsed, null, 2);
+            writeFileSecure(this.storePath, cleaned, PERMISSION_MODES.OWNER_READ_WRITE);
+          } catch (err) {
+            log.warning(`webhook secret migration: failed to re-persist scrubbed store: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+
+        return parsed;
       }
     } catch (error) {
       log.warning(`Failed to load webhooks: ${error}`);
@@ -318,8 +381,14 @@ export class WebhookDispatcher {
    *
    * Using Promise.allSettled so one slow/failing webhook does not block
    * or cancel delivery to others (I275).
+   *
+   * Awaits env-driven init first so an event fired during the very
+   * first tick of the server (before NLMCP_WEBHOOK_URL has finished
+   * its DNS resolution) does not silently miss its env-configured
+   * delivery target.
    */
   async dispatch(event: SystemEvent): Promise<void> {
+    await this.initFromEnvPromise;
     const targets = this.store.webhooks.filter(
       (w) => w.enabled && this.shouldSend(w, event.type),
     );
@@ -1034,10 +1103,52 @@ export class WebhookDispatcher {
   }
 
   /**
-   * List all webhooks
+   * List all webhooks (full records, including URL).
+   *
+   * Internal-only — this returns full URLs that may embed secret
+   * tokens (Slack incoming-webhook URLs, Discord webhooks, etc.) and
+   * historically may include legacy persisted `secret` fields. MCP
+   * tool handlers must use `listWebhooksPublic()` instead.
    */
   listWebhooks(): WebhookConfig[] {
     return this.store.webhooks;
+  }
+
+  /**
+   * List webhooks as redacted public DTOs.
+   *
+   * The MCP `list_webhooks` tool is read-scope, which means a caller
+   * with only a read-only token can invoke it. Handing back full
+   * `WebhookConfig` records would leak credential-bearing URLs
+   * (Slack, Discord, Teams all embed tokens in the URL path). This
+   * method returns just the metadata needed to identify each
+   * webhook: id, name, host, format, events, enabled flag, retry
+   * settings, timestamps, and a `hasSecret` boolean to disclose
+   * whether an HMAC secret is configured without revealing it.
+   */
+  listWebhooksPublic(): WebhookConfigPublic[] {
+    return this.store.webhooks.map((w) => {
+      let host: string;
+      try {
+        host = new URL(w.url).host;
+      } catch {
+        host = "[invalid-url]";
+      }
+      return {
+        id: w.id,
+        name: w.name,
+        enabled: w.enabled,
+        events: w.events,
+        format: w.format,
+        host,
+        hasSecret: this.webhookSecrets.has(w.id),
+        retryCount: w.retryCount,
+        retryDelayMs: w.retryDelayMs,
+        timeoutMs: w.timeoutMs,
+        createdAt: w.createdAt,
+        updatedAt: w.updatedAt,
+      };
+    });
   }
 
   /**

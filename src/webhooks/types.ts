@@ -64,3 +64,30 @@ export interface UpdateWebhookInput {
   secret?: string;
   headers?: Record<string, string>;
 }
+
+/**
+ * Redacted public DTO returned by listWebhooks-style read endpoints.
+ *
+ * Some webhook URL formats (Slack, Discord, Microsoft Teams) embed
+ * credential tokens directly in the URL path — handing the full URL
+ * back to a read-scope MCP caller is equivalent to handing them the
+ * webhook secret. The `host` field is the only URL component a
+ * read-scope caller needs to identify the webhook target. The
+ * `hasSecret` boolean discloses whether an HMAC signing secret is
+ * configured without revealing its value.
+ */
+export interface WebhookConfigPublic {
+  id: string;
+  name: string;
+  enabled: boolean;
+  events: (EventType | "*")[];
+  format: "generic" | "slack" | "discord" | "teams";
+  /** URL host only — never the full URL. */
+  host: string;
+  hasSecret: boolean;
+  retryCount?: number;
+  retryDelayMs?: number;
+  timeoutMs?: number;
+  createdAt: string;
+  updatedAt: string;
+}
