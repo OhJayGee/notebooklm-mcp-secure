@@ -15,7 +15,8 @@ browser_state/
 chrome_profile/
 .notebooklm-mcp/
 .claude/
-CLAUDE.md
+# Note: CLAUDE.md is now a tracked project-memory file pointing at
+# AGENTS.md. Per-user / per-session local notes go in .claude/ instead.
 
 # IDE
 .vscode/
@@ -43,7 +44,6 @@ medusa-env/
 # Archives / local notes
 *.tar.gz
 mcp-add-command.txt
-docs/
 
 # Internal go-live planning (not for public)
 golive.md
