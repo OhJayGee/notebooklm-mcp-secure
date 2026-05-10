@@ -2,52 +2,59 @@
 
 # NotebookLM MCP Server (Security Hardened)
 
-### 🏆 The World's Most Advanced NotebookLM MCP Server
+**MCP server for NotebookLM with hardened input validation, audit logging, post-quantum local encryption, and supply-chain controls.**
 
-**Zero-hallucination answers • Gemini Deep Research • 17 Security Layers • Enterprise Compliance**
-
-[![npm](https://img.shields.io/npm/v/@pan-sec/notebooklm-mcp?color=blue)](https://www.npmjs.com/package/@pan-sec/notebooklm-mcp)
-[![CalVer](https://img.shields.io/badge/CalVer-2026.3.1-blue.svg)](https://calver.org/)
+[![npm](https://img.shields.io/npm/v/@ohjaygee/notebooklm-mcp-secure?color=blue)](https://www.npmjs.com/package/@ohjaygee/notebooklm-mcp-secure)
+[![CalVer](https://img.shields.io/badge/CalVer-2026.3.3-blue.svg)](https://calver.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue.svg)](https://www.typescriptlang.org/)
 [![MCP](https://img.shields.io/badge/MCP-2026-green.svg)](https://modelcontextprotocol.io/)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#cross-platform-support)
-[![Security](https://img.shields.io/badge/Security-17%20Layers-red.svg)](./SECURITY.md)
-[![Post-Quantum](https://img.shields.io/badge/Encryption-Post--Quantum-purple.svg)](./SECURITY.md#post-quantum-encryption)
-[![Gemini](https://img.shields.io/badge/Gemini-Deep%20Research-4285F4.svg)](#-gemini-deep-research-v180)
-[![Documents](https://img.shields.io/badge/Documents-API%20Upload-34A853.svg)](#-document-api-v190)
-[![Notebooks](https://img.shields.io/badge/Notebooks-Create%20%26%20Manage-orange.svg)](#programmatic-notebook-creation-v170)
-[![Compliance](https://img.shields.io/badge/Compliance%20Ready-GDPR%20%7C%20SOC2%20%7C%20CSSF-blue.svg)](./docs/COMPLIANCE-SPEC.md)
-[![Tests](https://img.shields.io/badge/Tests-609%20Passing-brightgreen.svg)](./tests/)
+[![Security](https://img.shields.io/badge/Security-See%20SECURITY.md-red.svg)](./SECURITY.md)
+[![Tests](https://img.shields.io/badge/Tests-747%20Passing-brightgreen.svg)](./tests/)
 
-[**What's New 2026**](#-whats-new-in-2026) • [**Deep Research**](#-gemini-deep-research) • [**Document API**](#-document-api) • [**Create Notebooks**](#programmatic-notebook-creation) • [**Security**](#security-features) • [**Install**](#installation)
+[**Why this fork**](#-why-this-fork) • [**What's New 2026**](#-whats-new-in-2026) • [**Threat model**](./SECURITY.md#threat-model--what-this-fork-defends-against-and-what-it-doesnt) • [**Install**](#installation)
 
 </div>
 
-> **The only NotebookLM MCP with enterprise-grade security, post-quantum encryption, and full Gemini API integration.**
+> Fork lineage: [PleasePrompto/notebooklm-mcp](https://github.com/PleasePrompto/notebooklm-mcp) → [Pantheon-Security/notebooklm-mcp-secure](https://github.com/Pantheon-Security/notebooklm-mcp-secure) → this fork. Maintained by [OhJayGee](https://github.com/OhJayGee).
 >
-> Security-hardened fork of [PleasePrompto/notebooklm-mcp](https://github.com/PleasePrompto/notebooklm-mcp) • Maintained by [Pantheon Security](https://pantheonsecurity.io)
+> The "security-hardened" framing means a specific threat model and a concrete control set — not a certification, not a silver bullet. Read [SECURITY.md § Threat Model](./SECURITY.md#threat-model--what-this-fork-defends-against-and-what-it-doesnt) before deploying.
+
+## 🛡️ Why this fork
+
+The upstream `notebooklm-mcp` is a working stdio MCP server for NotebookLM. This fork adds, in priority order:
+
+1. **Input-validation trust boundaries.** Every URL, path, and MCP tool argument is validated at every persistence boundary — including persisted state read back from disk. A poisoned library entry cannot navigate the authenticated browser to an attacker origin; a single-file upload cannot read `~/.ssh/id_rsa`; a chat-history export cannot overwrite `~/.zshrc`.
+2. **Hash-chained audit logging** with cross-day chain linkage and integrity verification on read.
+3. **Token-based MCP authentication** with `admin` and `read` scopes, exponential lockout, persistent salt, and constant-time compare on a fixed-length canonical buffer.
+4. **Local at-rest encryption** for credential / session-state files using ChaCha20-Poly1305 + ML-KEM-768. Scope is offline-disk-theft only — both keys live on the same host. Failure to encrypt is fail-closed (refuses to write plaintext) unless explicitly opted in.
+5. **Supply-chain hardening at install time.** Exact-version pins enforced in CI, Sigstore signature verification, lockfile-drift detection, npm audit ratchet, and `--ignore-scripts` everywhere except the one sanctioned step.
+6. **Compliance primitives toward GDPR / SOC2 / CSSF.** Consent management, DSAR handler, retention engine, SIEM exporter, change-management ChangeLog. **Primitives**, not certification.
+
+The full list of changes vs. upstream lives in [CHANGELOG.md](./CHANGELOG.md). The threat model, including what this fork explicitly does *not* defend against, lives in [SECURITY.md](./SECURITY.md#threat-model--what-this-fork-defends-against-and-what-it-doesnt).
 
 ### ⚡ TL;DR — What You Get
 
-- 🔍 **Query your NotebookLM notebooks** — source-grounded, zero-hallucination answers
+- 🔍 **Query your NotebookLM notebooks** — source-grounded answers with prompt-injection detection on responses
 - 📚 **Create & manage notebooks programmatically** — no manual clicking
 - 🎙️ **Generate audio overviews** — podcast-style summaries of your docs
-- 🎬 **Generate video overviews** — AI video summaries with 10 visual styles **NEW**
-- 📊 **Extract data tables** — structured JSON from notebook sources **NEW**
-- 🔬 **Gemini 3 + Deep Research** — latest models with thinking control (optional API) **NEW**
+- 🎬 **Generate video overviews** — AI video summaries with 10 visual styles
+- 📊 **Extract data tables** — structured JSON from notebook sources
+- 🔬 **Gemini 3 + Deep Research** — latest models with thinking control (optional API)
 - 📄 **Document API** — upload & query PDFs without browser (optional API)
-- 🔐 **17 security layers** — post-quantum encryption, audit logs, secrets scanning
-- ✅ **Compliance-ready architecture** — built to GDPR, SOC2, and CSSF standards (controls implemented; formal certification requires third-party audit)
+- 🔐 **Hardened input validation, audit logs, local at-rest encryption, supply-chain controls** — see [SECURITY.md](./SECURITY.md) for the threat model and concrete mechanisms
+- 🧱 **Compliance primitives** — consent management, DSAR, retention, SIEM exporter, change-management ChangeLog. Necessary, not sufficient — formal certification requires a third-party audit covering policies, training, vendor management, and incident response procedures.
 - 💡 **No API key required** — core features work with just browser auth
 
 ---
 
 ## 🚀 What's New in 2026
 
-**Latest: v2026.3.1** — All 334 audit issues resolved. 631 tests. Full MCP protocol compliance.
+**Latest: v2026.3.3** — Adversarial review fixes. Tests: 643 → 747. All critical / high / medium findings from two independent reviews patched with regression tests pinning each fix.
 
 | Version | Highlights |
 |---------|------------|
+| **v2026.3.3** | **Adversarial Review Fixes** — Two independent adversarial reviews of the codebase converged on the same critical findings (notebook-library URL poisoning, sessionStorage-into-attacker-origin, single-file upload bypass, read-only-token-can-mutate) plus a high-severity arbitrary file write in `get_notebook_chat_history`. All findings patched with 104 new regression tests. `package.json` claims trimmed to honest scope at the same time (`enterpriseCompliance` → `complianceControls` with explicit "necessary, not sufficient" caveat; each `securityHardening` entry now describes its actual mechanism). Supply-chain gates added in CI: exact-pin enforcement, Sigstore signature verification, lockfile-drift detection, npm audit ratchet. |
 | **v2026.3.1** | **Security Audit Complete** — All 334 issues from the independent audit resolved. Tests: 609 → 631. Code quality: URL resolution deduplicated, handler extraction, non-null assertions eliminated. Test gaps closed: `validateNotebookId`, error body shape, `delete_document` confirm guard, sanitized throws, log rotation, rate-limiter memory bound, range clamping. |
 | **v2026.3.0** | **The Security Audit Release** — Four parallel AI code reviews (security, protocol, architecture, testing) against 334 issues. All highs and mediums resolved. Tests: 139 → 609 across 50 files (4.4×). Full MCP protocol compliance: structuredContent, isError, transport tags. Schema bounds on all 48 tools. Annotation correctness. Webhook SSRF fix. Audit log integrity (hash chain, concurrent write lock, rotation continuity). Per-page mutex. HandlerContext DI. Cert pinning retracted (claims aligned with implementation). |
 | **v2026.2.10** | **The Hardening Release** — 3 new security layers (14→17): secure-by-default auth, exponential backoff lockout, credential isolation. Architecture overhaul: 3,611-line handler split into 9 domain modules, tool registry pattern. Gemini API retry with backoff. Multi-stage Docker build. Token CLI (`token show/rotate`). 168 tests. |
@@ -71,7 +78,7 @@
 
 ```bash
 # Quick install
-claude mcp add notebooklm -- npx @pan-sec/notebooklm-mcp@latest
+claude mcp add notebooklm -- npx @ohjaygee/notebooklm-mcp-secure@latest
 ```
 
 ### Why Choose This MCP?
@@ -82,8 +89,8 @@ claude mcp add notebooklm -- npx @pan-sec/notebooklm-mcp@latest
 | Create notebooks programmatically | ❌ | ✅ **UNIQUE** |
 | Gemini Deep Research | ❌ | ✅ **EXCLUSIVE** |
 | Document API (no browser) | ❌ | ✅ **EXCLUSIVE** |
-| Post-quantum encryption | ❌ | ✅ **Hybrid PQ at-rest** |
-| Enterprise compliance | ❌ | ✅ **GDPR/SOC2/CSSF-ready** |
+| Local at-rest encryption | ❌ | ✅ **ChaCha20-Poly1305 + ML-KEM-768 hybrid (offline-disk-theft scope)** |
+| Compliance primitives (GDPR / SOC2 / CSSF) | ❌ | ✅ **Code-level controls; certification requires third-party audit** |
 | Video Overview generation | ❌ | ✅ **NEW** |
 | Data Table extraction | ❌ | ✅ **NEW** |
 | Chat history extraction | ❌ | ✅ |
@@ -120,7 +127,7 @@ In April 2026, we commissioned a parallel deep-audit of v2026.2.11 (`main @ 2973
 
 ### Key Fixes
 
-- **17 security vulnerabilities** addressed (auth bypass, SSRF, audit integrity, race conditions, selector injection vectors)
+- **17 distinct security findings** addressed across the audit (auth bypass, SSRF, audit integrity, race conditions, selector injection vectors)
 - **MCP protocol fully compliant** — all 48 tools return correct `structuredContent`/`isError` shapes; annotations accurate; schema bounds enforced
 - **Architecture decomposed** — `handlers.ts` split into 9 domain modules with HandlerContext dependency injection; 100% unit-testable without process mocks
 - **Test coverage** — 15 new security-critical test suites including browser session, auth, prompt injection, audit log, webhook, DSAR, and compliance
@@ -186,7 +193,7 @@ In April 2026, we commissioned a parallel deep-audit of v2026.2.11 (`main @ 2973
 | `test_webhook` | Test webhook delivery |
 | `remove_webhook` | Remove a webhook |
 
-#### Enterprise Compliance (16 additional tools)
+#### Compliance Primitives (16 additional tools)
 See [Compliance Documentation](./docs/COMPLIANCE-SPEC.md) for full list.
 
 </details>
@@ -675,7 +682,7 @@ The original NotebookLM MCP is excellent for productivity — but MCP servers ha
 - **Cookies and tokens** stored on disk
 - **Query history** that may contain proprietary information
 
-This fork adds **17 security hardening layers** to protect that data.
+This fork adds concrete code-level controls for that data — see [SECURITY.md](./SECURITY.md) for the threat model and the per-mechanism description. The list below is the headline summary.
 
 ---
 
@@ -729,15 +736,15 @@ Full native support for all major operating systems:
 
 All sensitive files (encryption keys, auth tokens, audit logs) are automatically protected with owner-only permissions on every platform.
 
-### Enterprise Compliance-Ready Architecture (v1.6.0+)
+### Compliance Primitives (v1.6.0+)
 
-Built to the standards required for regulated industries. All code-level technical controls are implemented — full compliance also requires organizational process controls (policies, training, vendor management). Formal certification (SOC2 Type II report, GDPR registration, CSSF submission) requires a third-party audit engagement.
+Code-level controls that are *necessary* for GDPR / SOC2 / CSSF compliance. They are not, by themselves, *sufficient*: full compliance also requires organisational process controls (policies, training, vendor management, incident response procedures), and formal certification (SOC2 Type II report, GDPR registration, CSSF submission) requires a third-party audit engagement covering both the code and the organisation. **This fork ships the code half. You bring the organisational half.**
 
-| Regulation | Controls Implemented |
+| Regulation | Code-Level Controls Provided |
 |------------|----------|
 | **GDPR** | Consent management, DSAR handling, right to erasure, data portability |
-| **SOC2 Type II** | Hash-chained audit logs, incident response, availability monitoring |
-| **CSSF** | 7-year retention, SIEM integration, policy documentation |
+| **SOC2 Type II** | Hash-chained audit logs, change-management ChangeLog, incident manager, availability monitoring |
+| **CSSF** | 7-year audit retention, SIEM exporter, policy-doc manager |
 
 #### Compliance Tools (16 MCP tools)
 ```
@@ -782,7 +789,7 @@ For repeatable authenticated validation, see the [Authenticated Testing Runbook]
 
 ### Claude Code
 ```bash
-claude mcp add notebooklm -- npx @pan-sec/notebooklm-mcp@latest
+claude mcp add notebooklm -- npx @ohjaygee/notebooklm-mcp-secure@latest
 ```
 
 ### With Authentication + Gemini (Recommended)
@@ -791,12 +798,12 @@ claude mcp add notebooklm \
   --env NLMCP_AUTH_ENABLED=true \
   --env NLMCP_AUTH_TOKEN=$(openssl rand -base64 32) \
   --env GEMINI_API_KEY=your-gemini-api-key \
-  -- npx @pan-sec/notebooklm-mcp@latest
+  -- npx @ohjaygee/notebooklm-mcp-secure@latest
 ```
 
 ### Codex
 ```bash
-codex mcp add notebooklm -- npx @pan-sec/notebooklm-mcp@latest
+codex mcp add notebooklm -- npx @ohjaygee/notebooklm-mcp-secure@latest
 ```
 
 <details>
@@ -808,7 +815,7 @@ Add to `~/.cursor/mcp.json`:
   "mcpServers": {
     "notebooklm": {
       "command": "npx",
-      "args": ["-y", "@pan-sec/notebooklm-mcp@latest"],
+      "args": ["-y", "@ohjaygee/notebooklm-mcp-secure@latest"],
       "env": {
         "NLMCP_AUTH_ENABLED": "true",
         "NLMCP_AUTH_TOKEN": "your-secure-token",
@@ -829,7 +836,7 @@ Add to `~/.gemini/antigravity/mcp_config.json` (macOS/Linux) or `%USERPROFILE%\.
   "mcpServers": {
     "notebooklm": {
       "command": "npx",
-      "args": ["-y", "@pan-sec/notebooklm-mcp@latest"]
+      "args": ["-y", "@ohjaygee/notebooklm-mcp-secure@latest"]
     }
   }
 }
@@ -841,7 +848,7 @@ With optional env vars:
   "mcpServers": {
     "notebooklm": {
       "command": "npx",
-      "args": ["-y", "@pan-sec/notebooklm-mcp@latest"],
+      "args": ["-y", "@ohjaygee/notebooklm-mcp-secure@latest"],
       "env": {
         "GEMINI_API_KEY": "your-gemini-api-key"
       }
@@ -863,7 +870,7 @@ Add to `~/.config/opencode/opencode.json` (global) or `opencode.json` in project
   "mcp": {
     "notebooklm": {
       "type": "local",
-      "command": ["npx", "-y", "@pan-sec/notebooklm-mcp@latest"],
+      "command": ["npx", "-y", "@ohjaygee/notebooklm-mcp-secure@latest"],
       "enabled": true,
       "environment": {
         "GEMINI_API_KEY": "your-gemini-api-key"
@@ -885,7 +892,7 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
   "mcpServers": {
     "notebooklm": {
       "command": "npx",
-      "args": ["-y", "@pan-sec/notebooklm-mcp@latest"],
+      "args": ["-y", "@ohjaygee/notebooklm-mcp-secure@latest"],
       "env": {
         "GEMINI_API_KEY": "your-gemini-api-key"
       }
@@ -905,7 +912,7 @@ Add to your VS Code `settings.json`:
     "servers": {
       "notebooklm": {
         "command": "npx",
-        "args": ["-y", "@pan-sec/notebooklm-mcp@latest"],
+        "args": ["-y", "@ohjaygee/notebooklm-mcp-secure@latest"],
         "env": {
           "GEMINI_API_KEY": "your-gemini-api-key"
         }
@@ -925,7 +932,7 @@ Most MCP clients use this standard format:
   "mcpServers": {
     "notebooklm": {
       "command": "npx",
-      "args": ["-y", "@pan-sec/notebooklm-mcp@latest"],
+      "args": ["-y", "@ohjaygee/notebooklm-mcp-secure@latest"],
       "env": {
         "GEMINI_API_KEY": "your-gemini-api-key"
       }
@@ -1118,7 +1125,7 @@ Or integrate in CI/CD:
 
 ```yaml
 - name: Security Scan
-  run: npx @pan-sec/notebooklm-mcp && npm run security-scan
+  run: npx @ohjaygee/notebooklm-mcp-secure && npm run security-scan
 ```
 
 ---
@@ -1127,7 +1134,7 @@ Or integrate in CI/CD:
 
 ### vs Other NotebookLM MCPs
 
-| Feature | Others | @pan-sec/notebooklm-mcp |
+| Feature | Others | @ohjaygee/notebooklm-mcp-secure |
 |---------|--------|-------------------------|
 | Zero-hallucination Q&A | ✅ | ✅ |
 | Library management | ✅ | ✅ |
@@ -1150,7 +1157,7 @@ Or integrate in CI/CD:
 
 ### Security & Compliance (Unique to This Fork)
 
-| Feature | Others | @pan-sec/notebooklm-mcp |
+| Feature | Others | @ohjaygee/notebooklm-mcp-secure |
 |---------|--------|-------------------------|
 | Cross-platform (Linux/macOS/Windows) | ⚠️ Partial | ✅ Full |
 | **Post-quantum encryption** | ❌ | ✅ ML-KEM-768 + ChaCha20 (local at-rest) |
@@ -1199,7 +1206,7 @@ Or integrate in CI/CD:
 | **v1.9.0** | Document API: upload, query, delete via Gemini Files API |
 | **v1.8.0** | Gemini Deep Research, Query with Grounding, Background Tasks |
 | **v1.7.0** | Programmatic notebook creation, batch operations, audio generation |
-| **v1.6.0** | Enterprise compliance: GDPR, SOC2 Type II, CSSF |
+| **v1.6.0** | Compliance primitives: GDPR, SOC2 Type II, CSSF (code-level controls only) |
 | **v1.5.0** | Cross-platform support (Windows ACLs, macOS, Linux) |
 | **v1.4.0** | Post-quantum encryption, secrets scanning |
 
@@ -1209,29 +1216,30 @@ Or integrate in CI/CD:
 
 Found a security issue? **Do not open a public GitHub issue.**
 
-Email: support@pantheonsecurity.io
+Email: olv@grolle.de
 
 ---
 
 ## Credits
 
 - **Original MCP Server**: [Gérôme Dexheimer](https://github.com/PleasePrompto) — [notebooklm-mcp](https://github.com/PleasePrompto/notebooklm-mcp)
-- **Security Hardening**: [Pantheon Security](https://pantheonsecurity.io)
+- **First security-hardening fork**: [Pantheon Security](https://github.com/Pantheon-Security/notebooklm-mcp-secure) — added the audit logger, MCP auth model, post-quantum at-rest encryption, and compliance primitives
+- **This fork (adversarial-review fixes + claim trim)**: [OhJayGee](https://github.com/OhJayGee)
 - **Post-Quantum Crypto**: [@noble/post-quantum](https://www.npmjs.com/package/@noble/post-quantum)
 - **Gemini API**: [Google AI](https://ai.google.dev/)
 
 ## License
 
-MIT — Same as original.
+MIT — preserved from upstream. Each link in the fork chain retains the previous copyright notices.
 
 ---
 
 <div align="center">
 
-**Security hardened with 🔒 by [Pantheon Security](https://pantheonsecurity.io)**
+**Maintained by [OhJayGee](https://github.com/OhJayGee)**
 
 **Powered by Google Gemini 3 🚀**
 
-[Full Security Documentation](./SECURITY.md) • [Compliance Guide](./docs/COMPLIANCE-SPEC.md) • [Report Vulnerability](mailto:support@pantheonsecurity.io)
+[Full Security Documentation](./SECURITY.md) • [Report Vulnerability](mailto:olv@grolle.de)
 
 </div>

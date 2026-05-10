@@ -1,12 +1,61 @@
 # Security Hardening Documentation
 
-This is a security-hardened fork of [PleasePrompto/notebooklm-mcp](https://github.com/PleasePrompto/notebooklm-mcp), maintained by [Pantheon Security](https://pantheonsecurity.io).
+Fork lineage: [PleasePrompto/notebooklm-mcp](https://github.com/PleasePrompto/notebooklm-mcp) → [Pantheon-Security/notebooklm-mcp-secure](https://github.com/Pantheon-Security/notebooklm-mcp-secure) → this fork. Maintained by [OhJayGee](https://github.com/OhJayGee).
 
-**Version**: 2026.3.1
-**Security Features**: 17 hardening layers
+**Version**: 2026.3.3
+**Security mechanisms**: see the table below — each row is a concrete mechanism backed by a test, not a marketing line item
 **Platforms**: Linux, macOS, Windows
 
+> **v2026.3.3 — Adversarial Review Fixes.** Two independent adversarial reviews of the codebase converged on the same critical findings (notebook-library URL poisoning, sessionStorage-into-attacker-origin, single-file upload bypass, read-only token can mutate state) plus a high-severity arbitrary file write in `get_notebook_chat_history`. All findings are patched in v2026.3.3 with regression tests pinning each one (104 new tests across 8 files; suite is now 747 passing). The package's `securityHardening` and `complianceControls` blocks have been rewritten in honest scope at the same time — each entry now describes its actual mechanism rather than a boolean. See [CHANGELOG.md](./CHANGELOG.md) for the full list.
+
 > **v2026.3.1 — Security Audit Complete.** In April 2026 we ran a parallel deep-audit of this codebase using four specialised AI code reviewers, each independently focused on a different attack surface. They produced a 334-item master issue list. All 334 issues are resolved across v2026.3.0 and v2026.3.1. See [CHANGELOG.md](./CHANGELOG.md) for the full list.
+
+## Threat Model — What This Fork Defends Against, And What It Doesn't
+
+The security claims below are scoped against a specific threat model. Reading
+them outside that model will mislead you.
+
+**This fork actively defends against:**
+
+- A prompt-injection chain through a malicious notebook source, web page, or
+  uploaded document trying to coerce the host LLM into emitting tool calls
+  that exfiltrate local files, overwrite system files, or navigate the
+  authenticated browser to attacker origins.
+- An MCP client (Claude Code, Codex CLI) that has accumulated bad context
+  and is now emitting unintended tool calls.
+- An attacker with read-scope authentication (or in an `NLMCP_AUTH_DISABLED`
+  deployment) trying to mutate library state, trigger remote NotebookLM
+  mutations, or upload local credentials to Google.
+- Supply-chain compromise of a transitive dependency at install time
+  (signature verification, `--ignore-scripts`, lockfile-drift detection,
+  exact-version pins).
+- Offline theft of individual encrypted credential / state files (local
+  at-rest encryption with ChaCha20-Poly1305 + ML-KEM-768).
+
+**This fork does NOT defend against:**
+
+- An attacker with admin-scope authentication. Admin scope can read any file
+  the process can read and write any path within the export base. Treat the
+  admin token as equivalent to your shell.
+- An attacker who has compromised the Google account whose session is in
+  use. The MCP server has the same notebook access the user does.
+- An attacker who can read or modify files in the data directory while the
+  server is running. The "encryption at rest" is local — the unwrap key
+  lives on the same disk. Filesystem isolation (perms, FDE) is the
+  defence-in-depth layer here.
+- Shoulder-surfing or screen-recording during interactive setup
+  (`setup_auth` opens a visible browser by default).
+- Browser-level exploits in Chrome / Chromium (we use the user's installed
+  browser).
+- A compromised Google bidding for the NotebookLM domain (the URL allowlist
+  trusts that `notebooklm.google.com` is operated by Google).
+
+**This fork is NOT a compliance certification.** GDPR / SOC2 / CSSF are
+organisational properties: they require policies, training, vendor management,
+incident response procedures, and a third-party audit. The compliance code
+in this repo provides necessary primitives — consent management, DSAR
+handling, retention engine, hash-chained audit logs, SIEM exporter — but
+those primitives are not sufficient for certification on their own.
 
 ## Security Features Overview
 
@@ -527,7 +576,7 @@ await audit.security('prompt_injection_detected', 'critical', { pattern: '...' }
 ## Reporting Vulnerabilities
 
 If you discover a security vulnerability:
-- Email: support@pantheonsecurity.io
+- Email: olv@grolle.de
 - Do NOT open a public GitHub issue for security vulnerabilities
 
 ---
@@ -535,9 +584,10 @@ If you discover a security vulnerability:
 ## Credits
 
 - Original implementation: [Gérôme Dexheimer](https://github.com/PleasePrompto)
-- Security hardening: [Pantheon Security](https://pantheonsecurity.io)
+- First security-hardening fork: [Pantheon Security](https://github.com/Pantheon-Security/notebooklm-mcp-secure)
+- This fork (adversarial-review fixes + claim trim): [OhJayGee](https://github.com/OhJayGee)
 - Post-quantum crypto: [@noble/post-quantum](https://www.npmjs.com/package/@noble/post-quantum)
 
 ## License
 
-MIT License (same as original)
+MIT License — preserved through every link in the fork chain.

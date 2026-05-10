@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.Pantheon-Security/notebooklm-mcp-secure",
-  "description": "Security-hardened NotebookLM MCP with post-quantum encryption",
-  "version": "2026.1.10",
+  "name": "io.github.OhJayGee/notebooklm-mcp-secure",
+  "description": "Security-hardened MCP server for NotebookLM. Provides primitives toward GDPR/SOC2/CSSF controls — not a certification.",
+  "version": "2026.3.3",
   "repository": {
-    "url": "https://github.com/Pantheon-Security/notebooklm-mcp-secure",
+    "url": "https://github.com/OhJayGee/notebooklm-mcp-secure",
     "source": "github"
   },
   "packages": [
     {
       "registryType": "npm",
-      "identifier": "@pan-sec/notebooklm-mcp",
-      "version": "2026.1.10",
+      "identifier": "@ohjaygee/notebooklm-mcp-secure",
+      "version": "2026.3.3",
       "transport": {
         "type": "stdio"
       }

@@ -1,8 +1,29 @@
 {
-  "name": "@pan-sec/notebooklm-mcp",
-  "version": "2026.3.2",
-  "mcpName": "io.github.Pantheon-Security/notebooklm-mcp-secure",
-  "description": "Security-hardened MCP server for NotebookLM API with compliance-ready architecture (GDPR, SOC2, CSSF controls implemented)",
+  "name": "@ohjaygee/notebooklm-mcp-secure",
+  "version": "2026.3.3",
+  "mcpName": "io.github.OhJayGee/notebooklm-mcp-secure",
+  "description": "Security-hardened MCP server for NotebookLM. Provides primitives toward GDPR/SOC2/CSSF controls — not a certification.",
+  "_lineage": {
+    "_doc": "Fork chain. Each link preserves the upstream MIT licence and acknowledges its predecessor. Update this block on every onward fork.",
+    "upstream": [
+      {
+        "name": "notebooklm-mcp",
+        "author": "PleasePrompto",
+        "repository": "https://github.com/PleasePrompto/notebooklm-mcp",
+        "role": "original implementation"
+      },
+      {
+        "name": "@pan-sec/notebooklm-mcp",
+        "author": "Pantheon Security",
+        "repository": "https://github.com/Pantheon-Security/notebooklm-mcp-secure",
+        "role": "first security-hardening fork — added the audit logger, MCP auth model, post-quantum at-rest encryption, compliance primitives"
+      }
+    ],
+    "thisFork": {
+      "name": "@ohjaygee/notebooklm-mcp-secure",
+      "rationale": "Adversarial-review fixes for the critical and high findings shared between two independent reviews (notebook-library URL poisoning, sessionStorage origin-pin bypass, single-file upload denylist gap, read-only-token-can-mutate, chat-history arbitrary file write). Marketing claims trimmed to honest scope. Supply-chain CI gates added (exact-pin enforcement, Sigstore signature verification, lockfile-drift detection, npm audit ratchet)."
+    }
+  },
   "type": "module",
   "bin": {
     "notebooklm-mcp": "dist/index.js"
@@ -39,18 +60,19 @@
     "enterprise",
     "audit-logging"
   ],
-  "author": "Pantheon Security <support@pantheonsecurity.io> (https://pantheonsecurity.io)",
+  "author": "OhJayGee <olv@grolle.de> (https://github.com/OhJayGee)",
   "contributors": [
-    "Gérôme Dexheimer <hello@geromedexheimer.de> (https://github.com/PleasePrompto) - Original Author"
+    "Gérôme Dexheimer <hello@geromedexheimer.de> (https://github.com/PleasePrompto) - Original author of upstream notebooklm-mcp",
+    "Pantheon Security <support@pantheonsecurity.io> (https://pantheonsecurity.io) - Author of intermediate security-hardened fork @pan-sec/notebooklm-mcp"
   ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Pantheon-Security/notebooklm-mcp-secure.git"
+    "url": "git+https://github.com/OhJayGee/notebooklm-mcp-secure.git"
   },
-  "homepage": "https://github.com/Pantheon-Security/notebooklm-mcp-secure#readme",
+  "homepage": "https://github.com/OhJayGee/notebooklm-mcp-secure#readme",
   "bugs": {
-    "url": "https://github.com/Pantheon-Security/notebooklm-mcp-secure/issues"
+    "url": "https://github.com/OhJayGee/notebooklm-mcp-secure/issues"
   },
   "files": [
     "dist",
@@ -79,7 +101,9 @@
     },
     "micromatch": {
       "picomatch": "2.3.2"
-    }
+    },
+    "patchright": "1.57.0",
+    "patchright-core": "1.57.0"
   },
   "devDependencies": {
     "@stryker-mutator/core": "9.6.1",
@@ -93,41 +117,42 @@
     "node": ">=18.0.0"
   },
   "securityHardening": {
-    "inputValidation": true,
-    "urlWhitelisting": true,
-    "rateLimiting": true,
-    "logSanitization": true,
-    "credentialMasking": true,
-    "auditLogging": true,
-    "sessionTimeout": true,
-    "mcpAuthentication": true,
-    "responseValidation": true,
-    "postQuantumEncryption": true,
-    "secretsScanning": true,
-    "memoryScrubbing": true,
-    "medusaIntegration": true,
-    "secureByDefaultAuth": true,
-    "exponentialBackoffLockout": true,
-    "credentialIsolation": true
+    "_doc": "Concrete code-level controls. Verify each against SECURITY.md and the test suite — these are claims, not certifications.",
+    "inputValidation": "url-allowlist + scheme-block + path-policy module",
+    "rateLimiting": "per-session + per-client; bounded map size",
+    "logSanitization": "email + secret + URL-credential redaction",
+    "auditLogging": "hash-chained, cross-day linkage, tamper-detect on read",
+    "sessionTimeout": "hard lifetime + inactivity; security-timeout override",
+    "mcpAuthentication": "SHA3-256 + persistent salt; constant-time compare; admin/read scopes",
+    "exponentialBackoffLockout": "5min × 3^(n-1), capped at 4h; per-client tracker",
+    "credentialIsolation": "LOGIN_PASSWORD/GEMINI_API_KEY in SecureCredential; env scrubbed",
+    "secureByDefaultAuth": "auth on by default; explicit NLMCP_AUTH_DISABLED=true to opt out",
+    "responseValidation": "pattern-based prompt-injection + URL detector (defence-in-depth, not a silver bullet)",
+    "secretsScanning": "TruffleHog/GitLeaks-style patterns with entropy gates",
+    "localAtRestEncryption": "ChaCha20-Poly1305 + ML-KEM-768 hybrid; both keys live on the same host (offline-disk-theft scope only)",
+    "memoryScrubbing": "Buffer-level zero-fill; JS strings remain in V8 heap until GC",
+    "webhookSsrfProtection": "scheme + lexical-IP + DNS-resolution + send-time revalidation; redirects refused",
+    "supplyChainGates": "exact-version pins + Sigstore signature verification + lockfile-drift check + npm audit ratchet in CI"
   },
-  "enterpriseCompliance": {
+  "complianceControls": {
+    "_doc": "Code-level primitives. Compliance is an organisational property — these features are necessary, not sufficient. Formal certification requires a third-party audit covering policies, training, vendor management, and incident response procedures.",
     "gdpr": {
-      "consentManagement": true,
-      "dataSubjectRights": true,
-      "dataPortability": true,
-      "rightToErasure": true,
-      "privacyNotice": true
+      "consentManagement": "grant/revoke per-purpose with legal basis",
+      "dataSubjectRights": "DSAR submission + tracking",
+      "dataPortability": "JSON/CSV export of user data",
+      "rightToErasure": "best-effort logical wipe; cannot guarantee on SSD/CoW filesystems without full-disk encryption",
+      "privacyNotice": "first-run notice + acknowledgement record"
     },
     "soc2": {
-      "hashChainedAuditLogs": true,
-      "changeManagement": true,
-      "incidentResponse": true,
-      "availabilityMonitoring": true
+      "hashChainedAuditLogs": "see auditLogging above",
+      "changeManagement": "ChangeLog records on auth/webhook mutation",
+      "incidentResponse": "incident manager primitives — does not replace IR plan",
+      "availabilityMonitoring": "health-monitor primitives"
     },
     "cssf": {
-      "sevenYearRetention": true,
-      "siemIntegration": true,
-      "policyDocumentation": true
+      "sevenYearRetention": "default 2555-day audit retention",
+      "siemIntegration": "exporter primitives for downstream SIEM",
+      "policyDocumentation": "policy-doc manager primitives"
     }
   }
 }

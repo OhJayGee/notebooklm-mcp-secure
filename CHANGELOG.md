@@ -5,6 +5,277 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026.3.3] - 2026-05-10
+
+### Adversarial Security Review — High and Medium Findings Resolved
+
+This release closes the findings from two independent adversarial reviews of the
+codebase (one performed via this repository's `CLAUDE_REVIEW.md`, one via
+`CODEX_REVIEW.md`). Both reviews converged on the same critical / high findings;
+this release also picks up the medium and low findings that only one review
+flagged. Marketing claims in `package.json` have been trimmed to honest scope at
+the same time — see "Claims" section below.
+
+**By the numbers:**
+- Tests: **643 → 747** across 59 test files (+104 regression tests pinning every fix)
+- `npx tsc --noEmit` — clean
+- `npm audit` — 0 high/critical vulnerabilities
+
+### Security — Vulnerabilities Patched
+
+- **HIGH `get_notebook_chat_history` arbitrary file write via `output_file`** —
+  the `output_file` parameter was passed to `fs.writeFile` with no path
+  validation. Reachable from a *read-scope* MCP token (or with auth disabled),
+  which let a prompt-injected MCP call overwrite e.g. `~/.ssh/authorized_keys`,
+  `~/.zshrc`, or crontab files with attacker-influenced JSON. Routed through
+  the new shared `resolveExportFilePath` (NLMCP_EXPORT_DIR / $HOME containment,
+  dotfile + sensitive-dir denylist, `0o600` perms, `flag: "w"`). Tool also
+  moved into `TOOLS_REQUIRING_AUTH` (admin scope).
+- **CRITICAL Notebook URL poisoning of the library** — `add_notebook` /
+  `update_notebook` accepted any URL and persisted it; later code paths
+  (`ask_question`, `get_notebook_chat_history`) treated stored URLs as
+  trusted and navigated the authenticated browser to them. Fixed by running
+  `validateNotebookUrl` at every library write *and* defensively re-validating
+  every persisted entry on `loadLibrary` (poisoned entries are dropped and the
+  cleaned library is re-persisted).
+- **CRITICAL sessionStorage written into attacker origin from poisoned URL**
+  — `BrowserSession.restoreSessionStorage` derived its target origin from
+  `this.notebookUrl`, so a poisoned library entry would cause the saved
+  NotebookLM sessionStorage to be written into the attacker's origin where
+  their page could read it back. Fixed: target origin is now pinned to a
+  hard-coded NotebookLM allowlist (public static `NOTEBOOKLM_RESTORE_ORIGINS`
+  for test pinning); the listener refuses to arm if `notebookUrl` itself is
+  not on the allowlist.
+- **CRITICAL `add_source` / `create_notebook` arbitrary local-file upload**
+  — the `type:"file"` source path bypassed the allowlist/denylist that
+  `add_folder` already had. A read-scope tool call could upload `~/.ssh/id_rsa`,
+  cloud credential files, `.env`, etc. to NotebookLM. Fixed by routing every
+  file source through the shared `assertSafeLocalReadPath`, which symlink-
+  resolves and re-checks against the same denylist used by `add_folder`.
+- **HIGH read-only token can mutate state and emit outbound requests** —
+  `add_notebook`, `update_notebook`, `remove_notebook`, `select_notebook`,
+  `create_notebook`, `batch_create_notebooks`, `sync_library`, `add_source`,
+  `remove_source`, `generate_audio_overview`, `generate_video_overview`,
+  `generate_data_table`, `set_quota_tier`, `close_session`, and `reset_session`
+  were classified as read-scope. All moved into `TOOLS_REQUIRING_AUTH`. The
+  read-scope set now contains only tools that read state.
+- **HIGH `add_folder` symlink-bypass of denylist** — the lexical denylist
+  check ran against the user-supplied folder path, but `scanDir` followed
+  symlinks during traversal. An attacker who controlled a directory the user
+  later passed could plant `evil/link → ~/.ssh` and exfiltrate keys. Fixed:
+  `scanDir` now `realpath`-resolves every entry and re-checks against the
+  shared denylist before recursing or uploading.
+- **MEDIUM `download_audio` arbitrary write via `output_path`** — admin-gated
+  but unbounded. Routed through the same `resolveExportFilePath` policy.
+- **MEDIUM `upload_document` arbitrary local-file read** — admin-gated but
+  unbounded. Routed through `assertSafeLocalReadPath`.
+- **MEDIUM SecureStorage fails open to plaintext** — when encryption was
+  disabled or no key was available, `save()` silently fell back to writing
+  plaintext credential files. Now throws a `secure storage refusing to write
+  plaintext for …` error and emits a `plaintext_save_refused` audit event,
+  unless the operator explicitly opts in via
+  `NLMCP_ALLOW_PLAINTEXT_CREDENTIAL_STORAGE=true`.
+- **MEDIUM webhook SSRF only validated at config time** — DNS-rebinding
+  could move a previously-validated host into RFC 1918 / cloud-metadata space
+  before delivery. `sendWithRetry` now re-runs `validateWebhookUrl` at
+  delivery time and refuses to call `fetch` if validation fails.
+- **MEDIUM `updateWebhook` persisted secret to disk** — contradicted the
+  explicit `// secret never persisted to disk` invariant honoured by
+  `addWebhook`. Update path now writes `secret: undefined` to the persisted
+  store and routes the new value through the in-memory `SecureCredential`
+  map; clearing the secret wipes and removes the credential.
+- **LOW auth tokens written to logs and stdout** — `printTokenInstructions`
+  and the `token rotate` CLI both unconditionally printed the bearer token.
+  Now TTY-gated: tokens print only when stderr/stdout is interactive,
+  otherwise written to a `0o600` file with only the path logged. Override
+  available via `NLMCP_PRINT_TOKEN_TO_STDERR=true`.
+- **LOW `validateFilePath` `startsWith` containment bug** — accepted
+  `base="/tmp/base"` + `resolved="/tmp/base-evil/file"` because the prefix
+  check was true. Replaced with `path.relative(base, resolved)` containment.
+- **LOW auth-failed response broke I330 contract** — when a tool failed
+  authentication, the response body omitted `data: null` and
+  `structuredContent`. Now the auth-failure body matches every other
+  error path.
+
+### Security — Supply-Chain Hardening
+
+- **Patchright pin tightened** — `patchright` and `patchright-core` added
+  to `overrides` so the transitive resolution cannot drift away from the
+  reviewed `1.57.0` tarball.
+- **CI pins are enforced** — new `scripts/check-exact-pins.cjs` fails the
+  build if any direct dep in `dependencies` / `devDependencies` /
+  `peerDependencies` uses a range specifier (`^`, `~`, `>=`, `*`, `latest`).
+- **CI signature verification** — `npm audit signatures` runs on every
+  build, catching a compromised mirror or maintainer-key takeover before
+  the dep gets baked into a build.
+- **CI vulnerability ratchet** — `npm audit --audit-level=high` now fails
+  the build on any known high or critical CVE in the dep tree.
+- **CI lockfile-drift detection** — `git diff --exit-code package-lock.json`
+  after `npm ci` fails the build if the lockfile is out of sync.
+- **Dockerfile `--ignore-scripts` everywhere** — both the builder and
+  runtime stages now use `npm ci --ignore-scripts`, defeating the standard
+  install-script attack class. The browser install (`npx patchright install
+  chromium`) is the only sanctioned lifecycle step.
+- **Documented chromium-binary mitigations** — the Dockerfile now spells
+  out the supply-chain levers for the chromium download (`PATCHRIGHT_DOWNLOAD_HOST`,
+  `PATCHRIGHT_SKIP_BROWSER_DOWNLOAD`, COPY-from-base-image patterns).
+
+### Added
+
+- **`src/utils/path-policy.ts`** — single source of truth for filesystem
+  path containment and credential-directory denylist. Three exports:
+  `resolveExportFilePath`, `assertSafeLocalReadPath`, `resolveAndCheckFolderPath`,
+  plus `isDeniedReadPath` for per-entry recursive checks. Denylist now
+  covers macOS / Windows credential paths the previous per-handler
+  implementations missed (`Library/Application Support/Google/Chrome`,
+  `.config/op`, `.config/Code/User`, `.cargo/credentials`, …).
+- **`scripts/check-exact-pins.cjs`** — pin-enforcement gate for CI.
+- **104 regression tests across 7 new files** — `path-policy.test.ts`,
+  `library-url-validation.test.ts`, `session-manager-url-validation.test.ts`,
+  `sessionstorage-origin-pin.test.ts`, `webhook-security-fixes.test.ts`,
+  `crypto-fail-closed.test.ts`, `auth-scope-classification.test.ts`. Plus
+  five new `validateFilePath` tests appended to `security.test.ts`.
+- **`AGENTS.md`** — single source of truth for AI-agent project memory.
+  Documents threat model, trust boundaries, how to add a new tool /
+  persisted store, path-policy usage rules, credential lifecycle,
+  fail-closed crypto invariant, audit-log conventions, supply-chain
+  rules, fork lineage, and common foot-guns. The thin pointer files
+  `CLAUDE.md`, `GEMINI.md`, and `CODEX.md` exist so each tool's
+  auto-loader finds something — they all delegate to `AGENTS.md`.
+- **`docs/security-reviews/`** — verbatim review reports moved out of
+  the repo root, indexed by `docs/security-reviews/README.md`. The
+  reusable prompt templates (module-scoped + whole-repo) live in
+  `docs/security-reviews/REVIEW_PROMPT_TEMPLATE.md` and have been
+  drafted to avoid offensive-security keywords that trip safety
+  classifiers on the more aggressive reviewers.
+
+### Changed
+
+- **`BrowserSession.NOTEBOOKLM_RESTORE_ORIGINS`** promoted from
+  `private static` to `public static readonly` so the regression test can
+  pin its contents. Set is still immutable; only the visibility changed.
+- **`add_folder` `resolveFolderPath`** delegates to the shared
+  `resolveAndCheckFolderPath` instead of duplicating the allowlist /
+  denylist logic.
+
+### Removed
+
+- **`Dockerfile`, `.dockerignore`, `smithery.yaml`** — moved out of the
+  repo to a sibling archive (`<parent-dir>/notebooklm-mcp-secure-archive/
+  docker-deploy/`) on 2026-05-10. The fork is now stdio-only; Docker
+  adds no security benefit for local subprocess use, and Smithery's
+  hosted path would need an HTTP-transport variant of the server we
+  don't ship. The artifacts are kept (out-of-repo) so a future
+  hosted-deployment effort can reuse them as a starting point.
+
+### Security — External Review Findings Addressed
+
+After v2026.3.3's initial path-policy module landed, the same toned-
+down review prompt was run against two further reviewers (Codex and
+Gemini). They converged on nine real findings, all addressed below
+with regression tests pinning each fix.
+
+**Tests: 747 → 775 (+28 regression tests pinning every external finding)**
+
+- **HIGH symlink in export base lets writes escape**
+  (`resolveExportFilePath`). Pre-fix, the lexical containment check
+  did not realpath-resolve intermediate symlinks. An attacker who
+  could plant a symlink inside the export base — e.g. `<base>/escape →
+  ~/.ssh` — could make a chat-history export write `<base>/escape/
+  authorized_keys`, which `fs.writeFile` followed through the symlink
+  to land at `~/.ssh/authorized_keys`. Fixed: both the export base
+  AND the candidate's parent directory are now `realpath`-resolved
+  before containment, the resolved parent is re-checked for both
+  containment and denylist membership, and an existing symlink at the
+  leaf path is refused outright (no write-through-symlink).
+
+- **MEDIUM `add_folder` symlinks bypassed the allowlist** (only the
+  denylist was re-checked per entry). An attacker who controlled a
+  directory the user later passed could plant `evil/link → /tmp/
+  outside/leak.md` and `add_folder` would upload the out-of-allowlist
+  target because `/tmp/outside` happens not to match any denied
+  segment. Fixed: new `assertSafeFolderEntryPath(realTarget,
+  allowedBases)` enforces both the allowlist AND the denylist on every
+  symlink-resolved entry; `scanDir` calls it before stat'ing.
+
+- **MEDIUM read policy accepted non-regular files**
+  (`assertSafeLocalReadPath`). A FIFO at `/tmp/trap.pdf`, a character
+  device at `/dev/zero`, or a UNIX socket all passed the policy check
+  and could cause the upload layer to hang, consume entropy, or
+  block. Fixed: the helper now requires the path to exist, resolve
+  via `realpath`, and stat as a regular file. `/dev`, `/run`,
+  `/var/run` added to `DENIED_ABSOLUTE` as defence-in-depth.
+
+- **HIGH case-insensitive denylist bypass** on macOS APFS / Windows
+  NTFS. An MCP caller with `file_path: ".SSH/id_rsa"` or `output_file:
+  ".ZSHRC"` would resolve to the same file as `.ssh` / `.zshrc` on
+  case-insensitive filesystems while bypassing the literal-equality
+  comparison. Both reviewers flagged this independently with confidence
+  10/10. Fixed: every segment compared against the denylist is
+  normalised through `policySegment` (NFC Unicode + lowercase + on
+  Windows trailing-dot/space stripping). The denylist constants are
+  pre-lowercased at module load.
+
+- **MEDIUM Windows-specific basename quirks** were unhandled. NTFS
+  alternate data streams (`.zshrc:hidden`), NTFS trailing-dot
+  stripping (`.zshrc.`), and reserved device names (`CON`, `PRN`,
+  `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`) all bypassed the basename
+  denylist. Fixed: `policyBasename` strips alternate-stream
+  specifiers, `policySegment` strips trailing `.` / space on Windows,
+  and reserved device basenames are refused outright.
+
+- **MEDIUM denylist missing modern credential stores.** Concrete
+  additions: `.azure`, `.config/gh`, `.config/hub`, `.config/stripe`,
+  `.config/Cursor`, `.config/Code - Insiders`, `.config/JetBrains`,
+  `.github_token`, `.gem/credentials`, `.gradle/gradle.properties`,
+  `.terraformrc`, `application_default_credentials.json`, the
+  Library/Application Support equivalents on macOS, the AppData/
+  Roaming equivalents on Windows, plus
+  `AppData/{Roaming,Local}/Microsoft/Credentials`.
+
+- **HIGH `DENIED_ABSOLUTE` was Unix-only.** On Windows or for cross-
+  mounted Windows volumes, `C:\Windows\System32\config\SAM`,
+  `C:\Documents and Settings\…\NTUSER.DAT`, and similar were
+  accepted. Fixed: Windows entries added (`C:\Windows\System32\
+  config`, `C:\Windows\System32\drivers\etc`, `C:\Windows\repair`,
+  `C:\Windows\security`, `C:\Documents and Settings`).
+
+- **MEDIUM `.env` variants accepted.** Pre-fix, only the literal
+  basename `.env` was on the write-denylist; `.env.local`,
+  `.env.production`, `.env.development`, `.env.test` all slipped
+  through. Fixed: `isEnvVariantBasename` matches `^\.env(\..+)?$` on
+  both write paths and read paths.
+
+- **LOW macOS APFS case-insensitive containment false-rejection**
+  (`isWithinBase`). On case-insensitive platforms, `/Users/olv` and
+  `/users/olv` name the same directory, but `path.relative` is case-
+  sensitive. Fixed: `isWithinBase` lowercases both sides on darwin /
+  win32 before computing the relative path; case-sensitive Linux
+  ext4 keeps the original strict comparison.
+
+- **MEDIUM `NLMCP_FOLDER_ALLOWLIST` parser used hard-coded `":"`.**
+  On Windows where `path.delimiter === ";"`, splitting on `:` would
+  misparse `C:\foo` as `["C", "\foo"]`. Fixed: `getFolderAllowedBases`
+  uses `path.delimiter`, exposed as a public helper for testing.
+
+### Claims (package.json)
+
+The `securityHardening` and `enterpriseCompliance` blocks have been rewritten
+in honest scope. Each entry is now a short string describing the actual
+mechanism (e.g. `"localAtRestEncryption": "ChaCha20-Poly1305 + ML-KEM-768
+hybrid; both keys live on the same host (offline-disk-theft scope only)"`)
+rather than a boolean implying full coverage. The `enterpriseCompliance`
+block is now `complianceControls` with explicit `_doc` text noting that
+"compliance is an organisational property — these features are necessary,
+not sufficient." Specific changes:
+
+- `postQuantumEncryption` → `localAtRestEncryption` with a scope caveat
+- `memoryScrubbing` annotated with the JS-string heap caveat
+- `responseValidation` annotated as defence-in-depth, not silver bullet
+- `enterpriseCompliance` → `complianceControls` with the necessary-vs-sufficient
+  caveat surfaced in `_doc`
+- New: `webhookSsrfProtection`, `supplyChainGates`
+
 ## [2026.3.1] - 2026-04-25
 
 ### Security Audit Complete — All 334 Issues Resolved

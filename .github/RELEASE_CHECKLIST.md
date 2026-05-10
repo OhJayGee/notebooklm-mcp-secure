@@ -106,15 +106,15 @@
 - `@modelcontextprotocol/sdk` updated to X.X.X
 
 ### Full Changelog
-https://github.com/Pantheon-Security/notebooklm-mcp-secure/compare/vPREV...vX.X.X
+https://github.com/OhJayGee/notebooklm-mcp-secure/compare/vPREV...vX.X.X
 ```
 
 ## 8. Post-Release Verification & Promotion
 
 ### Verify Publication
-- [ ] npm: `npm view @pan-sec/notebooklm-mcp version`
+- [ ] npm: `npm view @ohjaygee/notebooklm-mcp-secure version`
 - [ ] GitHub: Check release page exists
-- [ ] npm page: https://www.npmjs.com/package/@pan-sec/notebooklm-mcp
+- [ ] npm page: https://www.npmjs.com/package/@ohjaygee/notebooklm-mcp-secure
 
 ### Promote the Release
 - [ ] Update any dependent projects
@@ -136,7 +136,7 @@ npm install @modelcontextprotocol/sdk@latest --save
 npm pack --dry-run
 
 # View npm page info
-npm view @pan-sec/notebooklm-mcp
+npm view @ohjaygee/notebooklm-mcp-secure
 
 # Full release flow
 npm run build && \
