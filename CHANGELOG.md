@@ -5,6 +5,169 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026.3.5] - 2026-05-10
+
+### Whole-Repo External Review (Round 4) — Three independent reviewers
+
+Three independent reviewers ran the toned-down Template 2 prompt
+against the v2026.3.4 codebase. Verbatim reports preserved in
+`docs/security-reviews/`:
+
+- `CLAUDE-FULL-REVIEW-V2026.3.4.md` (Claude Opus 4.7) — 5 findings
+- `CODEX_FULL_FINDINGS-V2026.3.4.md` (Codex GPT-5) — 2 findings, both
+  pre-addressed by Codex itself before this release
+- `GEMINI31Pro_FULL_FINDINGS-V2.md` (Gemini 3.1 Pro) — 3 findings,
+  including one CRITICAL SSRF in audio download
+
+After deduplication, **8 distinct findings** ship in v2026.3.5. All
+addressed below with regression tests pinning each fix.
+
+**By the numbers:**
+- Tests: **804 → 837** (+33 regression tests in
+  `tests/external-review-round4-fixes.test.ts`)
+- `npx tsc --noEmit` — clean
+- `npm audit` — 0 high/critical vulnerabilities
+
+### Security — Critical / High Findings
+
+- **CRITICAL — AudioManager SSRF via `page.goto` on scraped URL**
+  (Gemini #1, conf 10). `audio-manager.ts:downloadAudio` previously
+  passed a URL scraped from the NotebookLM page DOM (a download
+  button's `href` or an `<audio src>`) directly to `page.goto`. A
+  prompt-injection chain through a malicious source document the
+  user added to a notebook could plant `<a download href="file:///
+  etc/passwd">` and the authenticated browser would navigate the
+  Playwright context to it, reading the local file into
+  `response.body()` for the attacker to retrieve. Cloud-metadata
+  SSRF (`https://169.254.169.254/`) was equally reachable.
+  Fixed: new shared `src/utils/url-validation.ts` module exporting
+  `validateNotebookLMMediaUrl(url)` that enforces (a) HTTPS only,
+  (b) no private/loopback/link-local IP, (c) hostname suffix on a
+  hard-coded NotebookLM media-download allowlist (`*.google.com`,
+  `*.googleusercontent.com`, `*.googleapis.com`). Called immediately
+  before `page.goto(downloadInfo.url)`.
+
+- **HIGH — AuditLogger hash-chain concurrency race** (Gemini #2,
+  conf 10). Pre-fix, `log()` captured `this.previousHash` before
+  enqueueing the event. Two concurrent `log()` calls would both
+  read `previousHash = X`, compute hashes against the same
+  predecessor, and write events whose hashes branched rather than
+  chained. `verifyIntegrity()` reported the resulting break as
+  tampering. Fixed: hash + previousHash are now stamped INSIDE
+  `flushEvent` under the per-day file lock, so the chain link
+  reflects actual write order regardless of how many `log()` calls
+  are in flight. Two regression tests in the new round-4 file
+  exercise a 25-event burst and assert chain verification + per-
+  event predecessor linkage.
+
+### Security — Medium Findings
+
+- **MEDIUM — Library mutations are audit-logged** (Claude L1, conf
+  9). `add_notebook`, `update_notebook`, `remove_notebook`, and
+  `select_notebook` are admin-scope tools that mutate persistent
+  state which is itself a privilege boundary (URLs persisted in the
+  library are later trusted for browser navigation). Pre-fix none
+  of the four handlers called `audit.tool` despite every other
+  admin-scope tool surface auditing. Fixed: each handler now emits
+  `audit.tool(...)` with the notebook id and host (host only, never
+  the full URL — same pattern as `recordWebhookChange`). Updates
+  also record `url_host_before` / `url_host_after`. Removals
+  record the closed-session count. Failed lookups still audit so
+  probes for non-existent IDs are visible.
+
+- **MEDIUM — Shutdown handler flushes audit + query loggers**
+  (Claude L2, conf 8). Pre-fix, `src/index.ts:shutdown` called
+  `process.exit(0)` after `server.close()` without awaiting
+  `getAuditLogger().flush()` or `getQueryLogger().flush()`.
+  `process.exit()` does NOT trigger `beforeExit` (Node docs
+  explicit), so audit / query events queued in the final ms could
+  be lost — a missing event silently breaks hash-chain verification
+  on the next run. Fixed: shutdown now awaits both flushes (each
+  wrapped in try/catch so a flush failure doesn't block the rest of
+  the teardown) before `wipeGlobalCredentials()` and `process.exit`.
+
+### Security — Low Findings
+
+- **LOW — `alert-manager.ts` and `siem-exporter.ts` validate outbound
+  URLs** (Claude L3, conf 8). Pre-fix both used `https.request`
+  directly without applying the SSRF defence pipeline that
+  `webhook-dispatcher.ts` got in v2026.3.4. Env-var trusted, so
+  practical impact is small — but the codebase-consistency argument
+  matters for a security-claiming fork. Fixed: both modules now
+  call the new shared `validateOutboundUrlSync` helper before
+  issuing the request; rejected URLs are logged and the delivery is
+  soft-failed.
+
+- **LOW — Quota state schema validation on load** (Claude L4, conf
+  7). Pre-fix `quota.json` was loaded with `JSON.parse(data) as
+  QuotaSettings` — no schema check, no integrity guard. A local
+  user (or malware running as the user) could edit the file to
+  reset `queriesUsedToday: 0` and bypass rate limits. Fixed: new
+  `QuotaManager.isValidQuotaSettings(loaded)` static validator
+  checks tier enum, limits structure, usage counter ranges (0 to
+  1M / 10M ceilings), and ISO-format date fields. Records that
+  fail validation fall through to `getDefaultSettings()` (the safest
+  state) and a warning is logged.
+
+- **LOW — `SettingsManager.saveSettings` serialised** (Gemini #3,
+  conf 9). Pre-fix, two concurrent `saveSettings` calls could read
+  the same `this.settings`, merge their respective deltas, and race
+  on the final write — the second writer's merge could lose
+  anything the first writer added. Fixed: new `saveQueue: Promise<
+  void>` chain serialises the read-merge-write cycle, mirroring
+  the pattern `WebhookDispatcher` uses for its JSON store.
+
+- **LOW — `get_health.deep_check` requires
+  `NLMCP_DEEP_HEALTH_ENABLED=true`** (Claude L5, conf 7). Pre-fix
+  `get_health` was read-scope but `deep_check: true` spawned a real
+  browser session and probed the chat UI — a side effect that
+  doesn't belong in a read-scope tool. Fixed: the deep-check path
+  is now gated on an explicit env-var opt-in
+  (`NLMCP_DEEP_HEALTH_ENABLED=true`). Without it, `deep_check: true`
+  is logged-as-warning and ignored. Makes the side effect visible
+  in deployment configuration rather than hidden in an optional
+  tool argument.
+
+### Codex Round-4 Findings (Pre-addressed)
+
+The Codex pass found two additional consistency gaps and addressed
+them in the same run before reporting:
+
+- **LOW — `handleComplianceToolCall` error sanitisation** (Codex
+  #1, conf 9). The compliance dispatcher now routes its catch-block
+  errors through `getSanitizedErrorMessage` so absolute paths and
+  stack-frame fragments are stripped before they reach the MCP
+  client.
+
+- **LOW — `PathPolicyError` branches use the sanitiser** (Codex
+  #2, conf 9). Every client-visible `PathPolicyError` return in
+  `system.ts`, `audio-video.ts`, and `gemini.ts` now goes through
+  `getSanitizedErrorMessage(err)` before being returned.
+
+### Added
+
+- **`src/utils/url-validation.ts`** — shared SSRF defence helpers
+  (`isPrivateIPv4`, `isPrivateIPv6`, `isPrivateHost`,
+  `validateOutboundUrl` async, `validateOutboundUrlSync`,
+  `validateNotebookLMMediaUrl`). Factored from
+  `webhook-dispatcher.ts` so the same defences can be applied
+  uniformly to every outbound HTTP code path.
+- **`tests/external-review-round4-fixes.test.ts`** — 33 regression
+  tests organised by finding number with cross-references to the
+  three round-4 review reports.
+
+### Changed
+
+- **`AuditLogger.flushEvent`** stamps `previousHash` and `hash`
+  inside the file-lock critical section instead of in the
+  pre-enqueue `log()` method. Public API unchanged.
+- **`SettingsManager.saveSettings`** now returns a serialised promise
+  via the `saveQueue` chain. Public API unchanged.
+- **`QuotaManager.loadSettings`** validates the parsed record
+  against a schema before trusting it.
+- **`audio-manager.ts:downloadAudio`** validates `downloadInfo.url`
+  through `validateNotebookLMMediaUrl` before `page.goto`.
+
 ## [2026.3.4] - 2026-05-10
 
 ### Whole-Repo External Review — Codex + Gemini 3.1 Pro
@@ -19,7 +182,7 @@ confidence ≥ 8, all addressed below with regression tests pinning each
 fix.
 
 **By the numbers:**
-- Tests: **777 → 804** (+27 regression tests in
+- Tests: **777 → 806** (+29 regression tests in
   `tests/external-review-round3-fixes.test.ts`, plus
   `tests/tool-file-safety.test.ts` adjusted for the export_library
   realpath canonicalisation)
@@ -112,6 +275,14 @@ fix.
   on every signal path (SIGINT, SIGTERM, uncaughtException,
   unhandledRejection) — and on the error-recovery path within
   `shutdown()` itself.
+- **LOW** — V2026.3.4 follow-up review found two residual
+  client-visible error hygiene gaps (Codex follow-up #1-#2, conf 9):
+  compliance tool failures stringified raw exceptions, and several
+  `PathPolicyError` branches returned raw path-policy messages with
+  host-specific absolute paths. Fixed: `handleComplianceToolCall`,
+  `system.ts`, `audio-video.ts`, and `gemini.ts` now route these
+  error paths through `getSanitizedErrorMessage`; two source-text
+  regression tests pin the behaviour.
 
 ### Added
 
