@@ -17,6 +17,7 @@ import { BrowserSession } from "./browser-session.js";
 import { SharedContextManager } from "./shared-context-manager.js";
 import { CONFIG } from "../config.js";
 import { log } from "../utils/logger.js";
+import { validateNotebookUrl } from "../utils/security.js";
 import type { SessionInfo } from "../types.js";
 import { randomBytes } from "crypto";
 import { getSessionTimeoutManager, SessionTimeoutManager } from "./session-timeout.js";
@@ -85,13 +86,26 @@ export class SessionManager {
     notebookUrl?: string,
     overrideHeadless?: boolean
   ): Promise<BrowserSession> {
-    // Determine target notebook URL
-    const targetUrl = (notebookUrl || CONFIG.notebookUrl || "").trim();
-    if (!targetUrl) {
+    // Determine target notebook URL.
+    //
+    // The session URL is the actual `page.goto` target — anything that
+    // reaches this point will be loaded inside the authenticated browser
+    // context, with NotebookLM cookies attached. We re-run the full
+    // NotebookLM allowlist check here even when callers claim to have
+    // pre-validated the URL: defence-in-depth against persisted state
+    // poisoning (a library entry written before validation existed) and
+    // any future code path that resolves URLs from untrusted storage.
+    const rawTargetUrl = (notebookUrl || CONFIG.notebookUrl || "").trim();
+    if (!rawTargetUrl) {
       throw new Error("Notebook URL is required to create a session");
     }
-    if (!targetUrl.startsWith("http")) {
-      throw new Error("Notebook URL must be an absolute URL");
+    let targetUrl: string;
+    try {
+      targetUrl = validateNotebookUrl(rawTargetUrl);
+    } catch (err) {
+      throw new Error(
+        `Notebook URL rejected by allowlist: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
 
     // Generate ID if not provided

@@ -14,6 +14,7 @@ import crypto from "crypto";
 import { CONFIG } from "../config.js";
 import { log } from "../utils/logger.js";
 import { writeFileSecure, PERMISSION_MODES } from "../utils/file-permissions.js";
+import { validateNotebookUrl, SecurityError } from "../utils/security.js";
 import type {
   NotebookEntry,
   Library,
@@ -203,13 +204,47 @@ export class NotebookLibrary {
   }
 
   /**
-   * Load library from disk, or create default if not exists
+   * Load library from disk, or create default if not exists.
+   *
+   * Defensive revalidation: every persisted notebook URL is re-checked
+   * against `validateNotebookUrl` on load. Library entries are user-
+   * controlled storage — a malicious add_notebook call (e.g. via prompt
+   * injection) could have planted `https://attacker.example/...` before
+   * URL validation was added at write time. Stripping invalid entries on
+   * load prevents the persistent foothold from outliving the patch.
    */
   private loadLibrary(): Library {
     try {
       if (fs.existsSync(this.libraryPath)) {
         const data = fs.readFileSync(this.libraryPath, "utf-8");
         const library = JSON.parse(data) as Library;
+
+        const before = library.notebooks.length;
+        library.notebooks = library.notebooks.filter((n) => {
+          try {
+            validateNotebookUrl(n.url);
+            return true;
+          } catch (err) {
+            log.warning(
+              `  ⚠️  Dropping library entry with invalid URL (id=${n.id}): ${err instanceof Error ? err.message : String(err)}`,
+            );
+            return false;
+          }
+        });
+        const dropped = before - library.notebooks.length;
+        if (dropped > 0) {
+          // If the active notebook was dropped, clear the pointer.
+          if (
+            library.active_notebook_id &&
+            !library.notebooks.some((n) => n.id === library.active_notebook_id)
+          ) {
+            library.active_notebook_id = null;
+          }
+          // Persist the cleaned library so the bad entry doesn't reappear
+          // next run.
+          this.saveLibrary(library);
+        }
+
         log.success(`  ✅ Loaded library with ${library.notebooks.length} notebooks`);
         return library;
       }
@@ -301,10 +336,23 @@ export class NotebookLibrary {
   }
 
   /**
-   * Add a new notebook to the library
+   * Add a new notebook to the library.
+   *
+   * The URL is validated against the NotebookLM allowlist at write time.
+   * This is the trust boundary: once a URL lives in the library, later
+   * code paths (ask_question, get_notebook_chat_history) treat it as
+   * trusted and navigate the authenticated browser to it. Without this
+   * gate, a read-scope tool call could plant `https://attacker.example/`
+   * here and later sessions would navigate the authenticated context to
+   * the attacker's origin.
    */
   addNotebook(input: AddNotebookInput): NotebookEntry {
     log.info(`📝 Adding notebook: ${input.name}`);
+
+    if (!input.url || typeof input.url !== "string") {
+      throw new SecurityError("notebook url is required");
+    }
+    const safeUrl = validateNotebookUrl(input.url);
 
     // Generate ID
     const id = this.generateId(input.name);
@@ -312,7 +360,7 @@ export class NotebookLibrary {
     // Create entry
     const notebook: NotebookEntry = {
       id,
-      url: input.url,
+      url: safeUrl,
       name: input.name,
       description: input.description,
       topics: input.topics,
@@ -404,6 +452,14 @@ export class NotebookLibrary {
 
     log.info(`📝 Updating notebook: ${input.id}`);
 
+    // Validate replacement URL through the NotebookLM allowlist before
+    // it reaches persisted state. Same trust-boundary rationale as
+    // addNotebook above.
+    let safeUpdatedUrl: string | undefined;
+    if (input.url !== undefined) {
+      safeUpdatedUrl = validateNotebookUrl(input.url);
+    }
+
     const updated = { ...this.library };
     const index = updated.notebooks.findIndex((n) => n.id === input.id);
 
@@ -415,7 +471,7 @@ export class NotebookLibrary {
       ...(input.content_types && { content_types: input.content_types }),
       ...(input.use_cases && { use_cases: input.use_cases }),
       ...(input.tags && { tags: input.tags }),
-      ...(input.url && { url: input.url }),
+      ...(safeUpdatedUrl && { url: safeUpdatedUrl }),
     };
 
     this.saveLibrary(updated);

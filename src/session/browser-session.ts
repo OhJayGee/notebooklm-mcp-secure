@@ -307,7 +307,43 @@ export class BrowserSession {
   }
 
   /**
-   * Safely restore sessionStorage when the page is on the expected origin
+   * Origin allowlist for sessionStorage restore. Saved sessionStorage is
+   * NotebookLM authentication state — restoring it into any other origin
+   * would hand attacker pages first-party access to the same key/value
+   * data. The allowlist mirrors `ALLOWED_NOTEBOOK_DOMAINS` in security.ts;
+   * we hard-code it here rather than re-importing the array so a future
+   * domain rename in security.ts forces an explicit review here too.
+   *
+   * Public so regression tests can pin the contents — every entry must
+   * be an HTTPS origin in the notebooklm.google.* family. Adding a
+   * non-NotebookLM origin to this set is a security bug.
+   */
+  public static readonly NOTEBOOKLM_RESTORE_ORIGINS: ReadonlySet<string> = new Set([
+    "https://notebooklm.google.com",
+    "https://notebooklm.google.co.uk",
+    "https://notebooklm.google.de",
+    "https://notebooklm.google.fr",
+    "https://notebooklm.google.es",
+    "https://notebooklm.google.it",
+    "https://notebooklm.google.nl",
+    "https://notebooklm.google.com.au",
+    "https://notebooklm.google.ca",
+  ]);
+
+  private isAllowedRestoreOrigin(origin: string | null): boolean {
+    if (!origin) return false;
+    return BrowserSession.NOTEBOOKLM_RESTORE_ORIGINS.has(origin);
+  }
+
+  /**
+   * Safely restore sessionStorage when the page is on a NotebookLM origin.
+   *
+   * Critical: the allowed origin is NOT derived from `this.notebookUrl`,
+   * because that URL comes from the library, which is user-controlled
+   * persisted state. Deriving the target origin from a poisoned library
+   * entry would cause this function to write authenticated NotebookLM
+   * sessionStorage into an attacker-controlled origin, where the attacker
+   * page can read it back via `window.sessionStorage`.
    */
   private async restoreSessionStorage(
     sessionData: Record<string, string>,
@@ -318,9 +354,13 @@ export class BrowserSession {
       return;
     }
 
-    const targetOrigin = this.getOriginFromUrl(this.notebookUrl);
-    if (!targetOrigin) {
-      log.warning(`  ⚠️  Unable to determine target origin for sessionStorage restore`);
+    // The notebook URL must itself resolve to a NotebookLM origin —
+    // refuse to even arm the listener otherwise.
+    const candidateOrigin = this.getOriginFromUrl(this.notebookUrl);
+    if (!this.isAllowedRestoreOrigin(candidateOrigin)) {
+      log.warning(
+        `  ⚠️  Refusing to restore sessionStorage: notebook URL origin '${candidateOrigin}' is not a NotebookLM origin`,
+      );
       return;
     }
 
@@ -332,7 +372,9 @@ export class BrowserSession {
       }
 
       const currentOrigin = this.getOriginFromUrl(this.page.url());
-      if (currentOrigin !== targetOrigin) {
+      // Both the configured target origin AND the page's current origin
+      // must be on the NotebookLM allowlist. Belt and braces.
+      if (!this.isAllowedRestoreOrigin(currentOrigin)) {
         return false;
       }
 
