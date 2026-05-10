@@ -257,21 +257,23 @@ export function maskEmail(email: string): string {
 }
 
 /**
- * Validate file path to prevent path traversal
+ * Validate file path to prevent path traversal.
+ *
+ * Containment is asserted via `path.relative`, not `startsWith`. The
+ * naive prefix check accepts adversarial cases like `base="/tmp/base"`
+ * and `resolved="/tmp/base-evil/file"`, where `startsWith(base)` is
+ * true but the file is outside `base`.
  */
 export function validateFilePath(basePath: string, filePath: string): string {
-  // Resolve to absolute path
-  const resolved = path.resolve(basePath, filePath);
+  const normalizedBase = path.resolve(basePath);
+  const resolved = path.resolve(normalizedBase, filePath);
 
-  // Ensure it's within the base path
-  const normalizedBase = path.normalize(basePath);
-  const normalizedResolved = path.normalize(resolved);
-
-  if (!normalizedResolved.startsWith(normalizedBase)) {
+  const rel = path.relative(normalizedBase, resolved);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
     throw new SecurityError('Path traversal detected: file must be within allowed directory');
   }
 
-  return normalizedResolved;
+  return resolved;
 }
 
 /**

@@ -9,6 +9,7 @@ import {
   validateNotebookUrl,
   validateNotebookId,
   validateQuestion,
+  validateFilePath,
   RateLimiter,
   SecurityError,
   sanitizeForLogging,
@@ -261,6 +262,42 @@ describe("Security Utilities", () => {
       }
       // Internal map must not exceed 10 000 entries
       expect(bigLimiter.size()).toBeLessThanOrEqual(10_000);
+    });
+  });
+
+  // ─── validateFilePath: prefix-bug regression ────────────────────────────
+  //
+  // Pre-fix used `resolved.startsWith(base)`, which accepts adversarial
+  // sibling paths like base="/tmp/base" + "/tmp/base-evil/file" because
+  // the prefix string match is true even though the file is outside base.
+  // Post-fix uses `path.relative(base, resolved)` and rejects when the
+  // result escapes via "..".
+  describe("validateFilePath (CODEX_REVIEW.md Low: startsWith prefix bug)", () => {
+    it("accepts a file inside the base directory", () => {
+      const result = validateFilePath("/tmp/base", "child.txt");
+      expect(result.endsWith("/tmp/base/child.txt") || result.endsWith("\\tmp\\base\\child.txt"))
+        .toBe(true);
+    });
+
+    it("accepts a nested file inside the base directory", () => {
+      const result = validateFilePath("/tmp/base", "sub/child.txt");
+      expect(result).toContain("base");
+      expect(result).toContain("child.txt");
+    });
+
+    it("rejects sibling-prefix path traversal (the actual prefix bug)", () => {
+      // Pre-fix would accept this because startsWith("/tmp/base") is true
+      // for "/tmp/base-evil/file". Post-fix's path.relative containment
+      // check rejects it.
+      expect(() => validateFilePath("/tmp/base", "../base-evil/file")).toThrow(SecurityError);
+    });
+
+    it("rejects ../ traversal that escapes the base", () => {
+      expect(() => validateFilePath("/tmp/base", "../escape.txt")).toThrow(SecurityError);
+    });
+
+    it("rejects an absolute path outside the base", () => {
+      expect(() => validateFilePath("/tmp/base", "/etc/passwd")).toThrow(SecurityError);
     });
   });
 });

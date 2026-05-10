@@ -7,6 +7,7 @@
 import type { HandlerContext } from "./types.js";
 import { log } from "../../utils/logger.js";
 import { validateNotebookUrl } from "../../utils/security.js";
+import { resolveExportFilePath, PathPolicyError } from "../../utils/path-policy.js";
 import type { ToolResult } from "../../types.js";
 import {
   AudioManager,
@@ -118,12 +119,36 @@ export async function handleDownloadAudio(
   try {
     const safeUrl = validateNotebookUrl(resolveNotebookUrl(ctx, args));
 
+    // Validate the output path through the shared export-path policy so
+    // an admin caller cannot drop the audio file at e.g. ~/.zshrc or
+    // ~/.ssh/authorized_keys (admin auth is gated, but we still apply
+    // defence-in-depth so a leaked admin token doesn't widen the blast
+    // radius).
+    let safeOutputPath: string | undefined;
+    if (args.output_path) {
+      try {
+        safeOutputPath = resolveExportFilePath(
+          args.output_path,
+          `notebooklm-audio-${Date.now()}.mp3`,
+        );
+      } catch (err) {
+        if (err instanceof PathPolicyError) {
+          return {
+            success: false,
+            data: null,
+            error: err.message,
+          };
+        }
+        throw err;
+      }
+    }
+
     // Get the shared context manager from session manager
     const contextManager = ctx.sessionManager.getContextManager();
 
     // Download audio
     const audioManager = new AudioManager(ctx.authManager, contextManager);
-    const result = await audioManager.downloadAudio(safeUrl, args.output_path);
+    const result = await audioManager.downloadAudio(safeUrl, safeOutputPath);
 
     if (result.success) {
       log.success(`✅ [TOOL] download_audio completed: ${result.filePath}`);

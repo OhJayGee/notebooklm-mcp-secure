@@ -17,6 +17,11 @@ import {
   validateNotebookId,
   sanitizeForLogging,
 } from "../../utils/security.js";
+import {
+  resolveExportFilePath,
+  assertSafeLocalReadPath,
+  PathPolicyError,
+} from "../../utils/path-policy.js";
 import { getQueryLogger } from "../../logging/index.js";
 import type {
   GeminiInteraction,
@@ -330,8 +335,21 @@ export async function handleUploadDocument(
       throw new Error("File path cannot be empty");
     }
 
+    // Apply the shared local-read policy: reject ~/.ssh, ~/.aws, /etc, …
+    // even when an admin token is in use. Admin compromise should not
+    // grant arbitrary local-file exfiltration to a third-party API.
+    let safeFilePath: string;
+    try {
+      safeFilePath = assertSafeLocalReadPath(args.file_path);
+    } catch (err) {
+      if (err instanceof PathPolicyError) {
+        return { success: false, data: null, error: err.message };
+      }
+      throw err;
+    }
+
     const result = await geminiClient.uploadDocument({
-      filePath: args.file_path,
+      filePath: safeFilePath,
       displayName: args.display_name,
     });
 
@@ -847,8 +865,30 @@ export async function handleGetNotebookChatHistory(
         index: startIdx + idx,
       }));
 
-      // Export to file if requested
+      // Export to file if requested. Path is constrained by the shared
+      // export-path policy (NLMCP_EXPORT_DIR or $HOME), which also blocks
+      // dotfile / sensitive-directory writes — without this, an MCP caller
+      // with read scope could overwrite e.g. ~/.ssh/authorized_keys via a
+      // prompt-injected tool call.
       if (args.output_file) {
+        let safeOutputPath: string;
+        try {
+          const date = new Date().toISOString().split("T")[0];
+          safeOutputPath = resolveExportFilePath(
+            args.output_file,
+            `notebooklm-chat-history-${date}.json`,
+          );
+        } catch (err) {
+          if (err instanceof PathPolicyError) {
+            return {
+              success: false,
+              data: null,
+              error: err.message,
+            };
+          }
+          throw err;
+        }
+
         const fs = await import("fs/promises");
         const exportData = {
           notebook_url: notebookUrl,
@@ -859,8 +899,14 @@ export async function handleGetNotebookChatHistory(
           assistant_messages: assistantMessages,
           messages: reindexedMessages,
         };
-        await fs.writeFile(args.output_file, JSON.stringify(exportData, null, 2));
-        log.success(`✅ [TOOL] get_notebook_chat_history exported to ${args.output_file}`);
+        // Refuse to clobber an existing file unless it is itself inside the
+        // export base — defence-in-depth against accidental overwrites.
+        await fs.writeFile(
+          safeOutputPath,
+          JSON.stringify(exportData, null, 2),
+          { mode: 0o600, flag: "w" },
+        );
+        log.success(`✅ [TOOL] get_notebook_chat_history exported to ${safeOutputPath}`);
 
         return {
           success: true,
@@ -871,7 +917,7 @@ export async function handleGetNotebookChatHistory(
             returned_messages: reindexedMessages.length,
             user_messages: userMessages,
             assistant_messages: assistantMessages,
-            output_file: args.output_file,
+            output_file: safeOutputPath,
           },
         };
       }

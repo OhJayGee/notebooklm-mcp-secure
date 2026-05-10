@@ -22,6 +22,13 @@ import { NotebookCreator } from "../../notebook-creation/notebook-creator.js";
 import { NotebookSync } from "../../notebook-creation/notebook-sync.js";
 import { SourceManager } from "../../notebook-creation/source-manager.js";
 import { validateNotebookUrl, validateSourceUrl } from "../../utils/security.js";
+import {
+  resolveAndCheckFolderPath,
+  assertSafeLocalReadPath,
+  assertSafeFolderEntryPath,
+  getFolderAllowedBases,
+  PathPolicyError,
+} from "../../utils/path-policy.js";
 import { getQuotaManager } from "../../quota/index.js";
 import { log } from "../../utils/logger.js";
 import { audit } from "../../utils/audit-logger.js";
@@ -50,7 +57,10 @@ export async function handleCreateNotebook(
       throw new Error("At least one source is required");
     }
 
-    // Validate each source
+    // Validate each source. File-type sources are routed through the
+    // shared local-read path policy so a malicious or prompt-injected
+    // tool call cannot upload ~/.ssh/id_rsa or other credential files
+    // to NotebookLM via what looks like a legitimate `create_notebook`.
     for (const source of args.sources) {
       if (!source.type || !["url", "text", "file"].includes(source.type)) {
         throw new Error(`Invalid source type: ${source.type}. Must be url, text, or file.`);
@@ -60,6 +70,15 @@ export async function handleCreateNotebook(
       }
       if (source.type === "url") {
         source.value = validateSourceUrl(source.value);
+      } else if (source.type === "file") {
+        try {
+          source.value = assertSafeLocalReadPath(source.value);
+        } catch (err) {
+          if (err instanceof PathPolicyError) {
+            throw new Error(`source rejected: ${err.message}`);
+          }
+          throw err;
+        }
       }
     }
 
@@ -405,6 +424,15 @@ export async function handleAddSource(
 
     if (args.source.type === "url") {
       args.source.value = validateSourceUrl(args.source.value);
+    } else if (args.source.type === "file") {
+      try {
+        args.source.value = assertSafeLocalReadPath(args.source.value);
+      } catch (err) {
+        if (err instanceof PathPolicyError) {
+          throw new Error(`source rejected: ${err.message}`);
+        }
+        throw err;
+      }
     }
 
     const safeUrl = validateNotebookUrl(resolveNotebookUrl(ctx, args));
@@ -439,81 +467,16 @@ export async function handleAddSource(
 }
 
 /**
- * Resolve `add_folder` input path and enforce the allowlist/denylist.
+ * Resolve `add_folder` input path. Delegates to the shared path-policy
+ * module so the allowlist + denylist live in one place; previously this
+ * helper duplicated the logic, drifting away from the read-path policy
+ * used by `add_source` / `create_notebook`.
  *
- * - Allowlist: `NLMCP_FOLDER_ALLOWLIST` (colon-separated absolute paths).
- *   Defaults to the user's home directory when unset.
- * - Denylist: paths that touch common credential/config dirs are rejected
- *   even when inside an allowed base (defence in depth).
- *
- * Rationale: `add_folder` uploads every file it finds to Google's NotebookLM.
- * Without constraints an authenticated caller can exfiltrate SSH keys,
- * cloud credentials, or kernel interfaces via a legitimate-looking user
- * action. See ISSUES.md:I316.
+ * Per-entry symlink resolution happens later, in `scanDir`, so a malicious
+ * symlink inside an allowed folder cannot exfiltrate ~/.ssh keys.
  */
 async function resolveFolderPath(userPath: string): Promise<string> {
-  const path = await import("path");
-  const os = await import("os");
-
-  if (!userPath || userPath.trim().length === 0) {
-    throw new Error("folder_path is required");
-  }
-
-  const resolved = path.resolve(userPath);
-
-  // Allowlist.
-  const envList = process.env.NLMCP_FOLDER_ALLOWLIST?.trim();
-  const allowedBases = envList && envList.length > 0
-    ? envList.split(":").map((p) => path.resolve(p.trim())).filter((p) => p.length > 0)
-    : [path.resolve(os.homedir())];
-
-  const inAllowedBase = allowedBases.some((base) => {
-    const rel = path.relative(base, resolved);
-    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
-  });
-  if (!inAllowedBase) {
-    throw new Error(
-      `folder_path must be inside one of: ${allowedBases.join(", ")}. ` +
-      `Set NLMCP_FOLDER_ALLOWLIST to extend the list.`
-    );
-  }
-
-  // Denylist (sensitive subpaths — checked after allowlist).
-  const deniedSegments = [
-    ".ssh",
-    ".aws",
-    ".gnupg",
-    ".docker",
-    ".kube",
-    ".config/gcloud",
-    ".config/git",
-    ".netrc",
-    ".npmrc",
-    ".mcpregistry_github_token",
-    ".mcpregistry_registry_token",
-  ];
-  const deniedAbsolute = ["/etc", "/root", "/proc", "/sys", "/var/log"];
-
-  const segments = resolved.split(path.sep);
-  for (const denied of deniedSegments) {
-    const parts = denied.split("/");
-    for (let i = 0; i <= segments.length - parts.length; i++) {
-      if (parts.every((p, j) => segments[i + j] === p)) {
-        throw new Error(
-          `folder_path traverses a sensitive directory (${denied}); refusing to upload.`
-        );
-      }
-    }
-  }
-  for (const denied of deniedAbsolute) {
-    if (resolved === denied || resolved.startsWith(denied + path.sep)) {
-      throw new Error(
-        `folder_path is inside a protected system directory (${denied}); refusing to upload.`
-      );
-    }
-  }
-
-  return resolved;
+  return resolveAndCheckFolderPath(userPath);
 }
 
 export async function handleAddFolder(
@@ -577,17 +540,49 @@ export async function handleAddFolder(
     }
 
     // ── 2. Scan files ────────────────────────────────────────────────────
+    // Each entry's real (symlink-resolved) target is re-checked against
+    // BOTH the shared denylist AND the folder allowlist before being
+    // added. Allowlist enforcement at the entry level is the half that
+    // closes the bypass found by external review: without it, a
+    // symlink inside an allowed folder pointing at /tmp/outside/leak.md
+    // would still upload that file, because the denylist alone does
+    // not forbid /tmp/outside.
+    const allowedBases = getFolderAllowedBases();
     const scanDir = async (dir: string): Promise<string[]> => {
       const entries = await fs.readdir(dir, { withFileTypes: true });
       const files: string[] = [];
       for (const entry of entries) {
         const fullPath = path.join(dir, entry.name);
-        if (entry.isDirectory() && recursive) {
-          files.push(...(await scanDir(fullPath)));
-        } else if (entry.isFile()) {
+
+        let realTarget: string;
+        try {
+          realTarget = await fs.realpath(fullPath);
+        } catch {
+          // Broken symlink or stat failure — skip rather than recurse.
+          continue;
+        }
+        try {
+          assertSafeFolderEntryPath(realTarget, allowedBases);
+        } catch (err) {
+          log.warning(
+            `  ⚠️  Skipping ${fullPath} — ${err instanceof PathPolicyError ? err.message : String(err)}`,
+          );
+          continue;
+        }
+
+        let realStat: import("fs").Stats;
+        try {
+          realStat = await fs.stat(realTarget);
+        } catch {
+          continue;
+        }
+
+        if (realStat.isDirectory() && recursive) {
+          files.push(...(await scanDir(realTarget)));
+        } else if (realStat.isFile()) {
           const ext = path.extname(entry.name).toLowerCase();
           if (fileTypes.includes(ext)) {
-            files.push(fullPath);
+            files.push(realTarget);
           }
         }
       }
