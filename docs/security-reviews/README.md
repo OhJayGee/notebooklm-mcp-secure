@@ -40,6 +40,26 @@ all confidence ≥ 7, all addressed in the same v2026.3.3 release. See
 the "External Review Findings Addressed" subsection of the v2026.3.3
 CHANGELOG entry.
 
+## Round 3 — Whole-repository v2026.3.4 review
+
+Two reviewers ran the whole-repository Template 2 review after the
+v2026.3.3 hardening work. The release entry for v2026.3.4 documents
+the deduplicated fix list and regression tests.
+
+| File | Reviewer | Scope |
+|------|----------|-------|
+| [`CODEX_FULL_FINDINGS.md`](./CODEX_FULL_FINDINGS.md) | Codex (GPT-5) | Whole repo: auth scopes, persisted state, resources, handlers, response validation |
+| [`GEMINI31Pro_FULL_FINDINGS.md`](./GEMINI31Pro_FULL_FINDINGS.md) | Gemini (3.1 Pro) | Whole repo: handler validation, async init, credential lifecycle, error hygiene |
+
+## Round 4 — v2026.3.4 follow-up
+
+Codex re-ran the Template 2 whole-repository review against the
+v2026.3.4 tree after the Round 3 fixes landed.
+
+| File | Reviewer | Scope |
+|------|----------|-------|
+| [`CODEX_FULL_FINDINGS-V2026.3.4.md`](./CODEX_FULL_FINDINGS-V2026.3.4.md) | Codex (GPT-5) | Follow-up whole repo review focused on residual gaps after v2026.3.4 |
+
 ## How to interpret these files
 
 - **Findings flagged confidence < 7 may not be present.** The review
