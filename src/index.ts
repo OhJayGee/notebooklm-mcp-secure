@@ -634,6 +634,30 @@ export class NotebookLMMCPServer {
         // Close server
         await this.server.close();
 
+        // Drain audit-log and query-log write queues. The two loggers
+        // each register their own `process.on("beforeExit", ...)`
+        // / SIGTERM handlers, but `process.exit(0)` below does NOT
+        // trigger `beforeExit` (Node docs are explicit), and our
+        // shutdown is reachable from SIGINT / uncaughtException /
+        // unhandledRejection too. Awaiting the explicit `flush()`
+        // call here is the only way to guarantee that audit events
+        // emitted in the final ms before shutdown actually reach
+        // disk. A missing event silently breaks hash-chain
+        // verification on the next run, which is the kind of bug
+        // you only notice much later.
+        try {
+          const { getAuditLogger } = await import("./utils/audit-logger.js");
+          await getAuditLogger().flush();
+        } catch (err) {
+          log.warning(`audit log flush during shutdown failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        try {
+          const { getQueryLogger } = await import("./logging/index.js");
+          await getQueryLogger().flush();
+        } catch (err) {
+          log.warning(`query log flush during shutdown failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
         // Wipe module-level SecureCredential holders so plaintext
         // LOGIN_PASSWORD / GEMINI_API_KEY do not survive past the point
         // the server is still using them. Per AGENTS.md credential
