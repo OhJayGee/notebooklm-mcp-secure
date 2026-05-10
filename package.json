@@ -1,6 +1,6 @@
 {
   "name": "@ohjaygee/notebooklm-mcp-secure",
-  "version": "2026.3.3",
+  "version": "2026.3.4",
   "mcpName": "io.github.OhJayGee/notebooklm-mcp-secure",
   "description": "Security-hardened MCP server for NotebookLM. Provides primitives toward GDPR/SOC2/CSSF controls — not a certification.",
   "_lineage": {

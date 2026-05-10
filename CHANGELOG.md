@@ -5,6 +5,141 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026.3.4] - 2026-05-10
+
+### Whole-Repo External Review — Codex + Gemini 3.1 Pro
+
+Two whole-repository review rounds (Codex + Gemini 3.1 Pro) using the
+toned-down Template 2 prompt in `docs/security-reviews/REVIEW_PROMPT_TEMPLATE.md`
+landed alongside this release. The verbatim reports live in
+`docs/security-reviews/CODEX_FULL_FINDINGS.md` and
+`docs/security-reviews/GEMINI31Pro_FULL_FINDINGS.md`. After
+deduplication the two reviewers surfaced 11 distinct findings, all
+confidence ≥ 8, all addressed below with regression tests pinning each
+fix.
+
+**By the numbers:**
+- Tests: **777 → 804** (+27 regression tests in
+  `tests/external-review-round3-fixes.test.ts`, plus
+  `tests/tool-file-safety.test.ts` adjusted for the export_library
+  realpath canonicalisation)
+- `npx tsc --noEmit` — clean
+- `npm audit` — 0 high/critical vulnerabilities
+
+### Security — External Review Fixes
+
+- **MEDIUM** — `list_webhooks` exposed credential-bearing webhook URLs
+  (Slack / Discord / Teams embed secret tokens in the URL path) and
+  any legacy persisted `secret` field to read-scope callers (Codex #2,
+  conf 9). Fixed:
+  - New `WebhookConfigPublic` DTO (id, name, host, format, events,
+    enabled, hasSecret, retry settings, timestamps) — never the full
+    URL or the secret value.
+  - New `WebhookDispatcher.listWebhooksPublic()` returns the redacted
+    DTO; the read-scope MCP `list_webhooks` handler now uses it.
+  - On `loadStore()`, any persisted `secret` field is migrated into
+    the in-memory `webhookSecrets` SecureCredential map and scrubbed
+    from the persisted record. Cleaned store is re-persisted so
+    subsequent loads see no plaintext secrets.
+- **MEDIUM** — `run_health_check` (and other compliance tools that are
+  not in `TOOL_NAMES`) defaulted to read-scope auth even though
+  `run_health_check` writes a probe file to disk, logs a compliance
+  event, and may dispatch outbound alert webhooks (Codex #3, conf 9).
+  Fixed: new `COMPLIANCE_TOOLS_REQUIRING_AUTH` set in `src/index.ts`
+  containing `run_health_check`. The auth gate now requires admin
+  scope when the tool name is in EITHER `TOOLS_REQUIRING_AUTH` (for
+  `TOOL_NAMES` members) OR `COMPLIANCE_TOOLS_REQUIRING_AUTH` (for
+  compliance tools outside that union type).
+- **MEDIUM** — MCP `resources/read`, `resources/list`,
+  `resources/templates/list`, `completion/complete`, `prompts/list`,
+  and `prompts/get` bypassed authentication entirely. The notebook
+  library's IDs / names / descriptions / topics / use-cases / URLs /
+  usage counts were reachable to any unauthenticated MCP caller
+  (Codex #4, conf 10). Fixed: new `assertReadScopeAuthorized` helper
+  in `src/resources/resource-handlers.ts` runs read-scope auth at the
+  start of every registered resource / completion / prompt handler.
+  When global auth is disabled the helper passes through.
+- **MEDIUM** — `export_library` still used a local lexical
+  `resolveExportPath()` helper instead of the shared
+  `resolveExportFilePath` from `src/utils/path-policy.ts`, so writes
+  could follow symlinked parents inside the export base (Codex #5,
+  conf 10). Fixed: deleted the local helper, routed through the
+  shared module. The local handler also now returns `data: null` on
+  the rejection path to preserve the I330 error contract.
+- **MEDIUM** — Gemini and chat-history responses bypassed
+  `response-validator.ts` (only `ask_question` ran model output
+  through the validator). A pattern that would be blocked when
+  surfaced via NotebookLM round-tripped unsanitised when surfaced via
+  Gemini (Codex #6, conf 8). Fixed: factored the validation block
+  into a shared `applyValidationToModelOutput(text)` helper; applied
+  to `deep_research`, `gemini_query`, `query_document`,
+  `query_chunked_document`, and the per-message validation in
+  `get_notebook_chat_history`. Each result type gained a
+  `security_warnings?: string[]` field that surfaces detector hits.
+- **LOW** — `close_session` and `reset_session` skipped
+  `validateSessionId` (Gemini #2, conf 10). Fixed: `withSessionOp`
+  now calls `validateSessionId` at the top and refuses any caller
+  that fails the regex (`^[a-zA-Z0-9_-]+$`, max 64 chars).
+- **LOW** — `deep_research` and `gemini_query` reimplemented
+  validation inline (different empty/length rules from
+  `validateQuestion`) (Gemini #3, conf 9). Fixed: extended
+  `validateQuestion(question, maxLength?)` with an optional
+  `maxLength` parameter; the deep_research handler passes 10000, the
+  gemini_query handler passes 30000.
+- **MEDIUM** — `gemini_query.urls` accepted `http://` and any other
+  HTTPS-looking string via an inline `startsWith` check (Gemini #4,
+  conf 10). Fixed: each url is run through `validateSourceUrl`
+  (HTTPS-only + dangerous-scheme block).
+- **MEDIUM** — `WebhookDispatcher` initialised env-driven webhooks
+  asynchronously (DNS lookup) without holding the promise; events
+  fired during the very first tick could miss their env-configured
+  delivery target (Gemini #5, conf 9). Fixed: store the init promise
+  in `initFromEnvPromise`, expose `whenInitialized()` for callers,
+  and `await this.initFromEnvPromise` at the top of `dispatch()`.
+  The MCP `list_webhooks` handler also awaits it before returning so
+  a fresh-start `list_webhooks` call sees the env-configured set.
+- **LOW** — `getSanitizedErrorMessage` in
+  `src/tools/handlers/error-utils.ts` only stripped absolute paths;
+  stack-frame fragments (`at funcName (file.ts:42:11)`) survived,
+  contradicting the global MCP exception handler in `src/index.ts`
+  which strips both (Gemini #6, conf 9). Fixed: copied the
+  stack-frame regex into `sanitizeErrorMessage` so per-handler error
+  paths get the same treatment.
+- **MEDIUM** — `LOGIN_PASSWORD` and `GEMINI_API_KEY` were wrapped in
+  `SecureCredential` but never `.wipe()`'d on shutdown (Gemini #7,
+  conf 10). Fixed: new `wipeGlobalCredentials()` exported from
+  `src/config.ts`; the shutdown handler in `src/index.ts` calls it
+  on every signal path (SIGINT, SIGTERM, uncaughtException,
+  unhandledRejection) — and on the error-recovery path within
+  `shutdown()` itself.
+
+### Added
+
+- **`tests/external-review-round3-fixes.test.ts`** — 27 regression
+  tests pinning the 11 fixes above, organised by finding number with
+  cross-references to the verbatim review reports.
+- **`WebhookDispatcher.whenInitialized()`** — public helper for
+  observers that need to wait for env-driven init.
+- **`WebhookDispatcher.listWebhooksPublic()`** — redacted DTO list.
+- **`applyValidationToModelOutput(text)`** in
+  `src/utils/response-validator.ts` — shared helper for any handler
+  that returns model-generated or page-scraped text.
+- **`wipeGlobalCredentials()`** in `src/config.ts`.
+- **`security_warnings?: string[]`** field on `DeepResearchResult`,
+  `GeminiQueryResult`, `QueryDocumentResult`, the inline
+  `query_chunked_document` result type, and the
+  `get_notebook_chat_history` result type.
+
+### Changed
+
+- **`validateQuestion(question, maxLength?)`** now accepts a
+  per-caller maxLength. Default is unchanged at 32000.
+- **`tests/tool-file-safety.test.ts`** — the
+  "allows export_library relative paths inside the export base" test
+  now `realpathSync`-resolves its tmpdir to match the canonicalised
+  path that `resolveExportFilePath` returns (macOS firmlinks
+  `/var` → `/private/var`).
+
 ## [2026.3.3] - 2026-05-10
 
 ### Adversarial Security Review — High and Medium Findings Resolved
