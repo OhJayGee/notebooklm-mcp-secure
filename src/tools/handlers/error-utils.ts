@@ -6,6 +6,11 @@ import type { HandlerContext } from "./types.js";
 import { log } from "../../utils/logger.js";
 
 const ABSOLUTE_PATH_PATTERN = /\/[^\s:,'"]+/g;
+// Stack-frame fragment pattern. Mirrors the regex used in the global
+// MCP exception handler in src/index.ts so error messages returned via
+// the per-handler path get the same sanitisation treatment as those
+// returned via the dispatcher's outer try/catch.
+const STACK_FRAME_PATTERN = /\bat\s+\S+\s+\(\S+:\d+:\d+\)/g;
 
 /**
  * Resolve a notebook URL from either an explicit URL, a notebook ID, or the
@@ -34,7 +39,10 @@ export function resolveNotebookUrl(
 }
 
 export function sanitizeErrorMessage(errorMsg: string): string {
-  return errorMsg.replace(ABSOLUTE_PATH_PATTERN, "[path]");
+  return errorMsg
+    .replace(ABSOLUTE_PATH_PATTERN, "[path]")
+    .replace(STACK_FRAME_PATTERN, "")
+    .trim();
 }
 
 export function getSanitizedErrorMessage(error: unknown): string {

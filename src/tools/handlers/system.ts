@@ -4,13 +4,12 @@
  * Handles export_library, get_project_info, get_quota, set_quota_tier, and cleanup_data tools.
  */
 
-import path from "path";
-import os from "os";
 import type { HandlerContext } from "./types.js";
 import type { ToolResult } from "../../types.js";
 import { log } from "../../utils/logger.js";
 import { getQuotaManager } from "../../quota/index.js";
 import { CleanupManager } from "../../utils/cleanup-manager.js";
+import { resolveExportFilePath, PathPolicyError } from "../../utils/path-policy.js";
 
 /**
  * Sanitize a CSV field to prevent formula injection (CWE-1236).
@@ -23,34 +22,6 @@ function csvSafe(value: string): string {
     return `"'${escaped}"`;
   }
   return `"${escaped}"`;
-}
-
-/**
- * Resolve and validate an export path, rejecting traversal outside the
- * configured base directory. Returns the absolute resolved path or throws.
- */
-function resolveExportPath(userPath: string | undefined, defaultName: string): string {
-  // Allowed base directories, in priority order:
-  //   1. NLMCP_EXPORT_DIR env override
-  //   2. user home directory
-  const envDir = process.env.NLMCP_EXPORT_DIR?.trim();
-  const baseDirRaw = envDir && envDir.length > 0 ? envDir : os.homedir();
-  const baseDir = path.resolve(baseDirRaw);
-
-  // If no user path, write under baseDir with the default name.
-  const candidate = userPath && userPath.trim().length > 0
-    ? path.resolve(baseDir, userPath)
-    : path.resolve(baseDir, defaultName);
-
-  // Defence in depth: ensure resolved path is still inside the base dir.
-  const rel = path.relative(baseDir, candidate);
-  if (rel.startsWith("..") || path.isAbsolute(rel)) {
-    throw new Error(
-      `output_path must resolve inside ${baseDir} (got '${candidate}'). ` +
-      `Set NLMCP_EXPORT_DIR to allow another base directory.`
-    );
-  }
-  return candidate;
 }
 
 export async function handleExportLibrary(
@@ -75,7 +46,15 @@ export async function handleExportLibrary(
 
     const date = new Date().toISOString().split("T")[0];
     const defaultName = `notebooklm-library-backup-${date}.${format}`;
-    const outputPath = resolveExportPath(args.output_path, defaultName);
+    let outputPath: string;
+    try {
+      outputPath = resolveExportFilePath(args.output_path, defaultName);
+    } catch (err) {
+      if (err instanceof PathPolicyError) {
+        return { success: false, data: null, error: err.message };
+      }
+      throw err;
+    }
 
     let content: string;
 
@@ -129,6 +108,7 @@ export async function handleExportLibrary(
     log.error(`❌ [TOOL] export_library failed: ${errorMessage}`);
     return {
       success: false,
+      data: null,
       error: errorMessage,
     };
   }
@@ -169,6 +149,7 @@ export async function handleGetProjectInfo(
     log.error(`❌ [TOOL] get_project_info failed: ${errorMessage}`);
     return {
       success: false,
+      data: null,
       error: errorMessage,
     };
   }
@@ -271,6 +252,7 @@ export async function handleGetQuota(
     log.error(`❌ [TOOL] get_quota failed: ${errorMessage}`);
     return {
       success: false,
+      data: null,
       error: errorMessage,
     };
   }
@@ -312,6 +294,7 @@ export async function handleSetQuotaTier(
     log.error(`❌ [TOOL] set_quota_tier failed: ${errorMessage}`);
     return {
       success: false,
+      data: null,
       error: errorMessage,
     };
   }
@@ -402,6 +385,7 @@ export async function handleCleanupData(
     log.error(`❌ [TOOL] cleanup_data failed: ${errorMessage}`);
     return {
       success: false,
+      data: null,
       error: errorMessage,
     };
   }

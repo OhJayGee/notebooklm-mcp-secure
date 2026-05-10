@@ -413,3 +413,40 @@ export function getResponseValidator(): ResponseValidator {
 export async function validateResponse(response: string): Promise<ValidationResult> {
   return getResponseValidator().validate(response);
 }
+
+/**
+ * Apply response validation to model-generated text and return the
+ * cleaned text + the security warnings that should accompany it.
+ *
+ * Factored out of `ask_question` so every other handler that returns
+ * model-generated text (`deep_research`, `gemini_query`, `query_document`,
+ * `query_chunked_document`, `get_notebook_chat_history`) can apply the
+ * same prompt-injection / suspicious-URL / encoded-payload sanitisation
+ * without duplicating the if/else ladder.
+ *
+ * Contract:
+ *   - If the response is "safe" with no warnings, returns the original
+ *     text and an empty warnings array.
+ *   - If the response contained blocked content, returns the sanitised
+ *     text and the list of blocked patterns as warnings.
+ *   - If the response had warning-level patterns only, returns the
+ *     original text and the warnings list.
+ *
+ * Callers should append `securityWarnings` to their structured result
+ * when the array is non-empty so MCP clients can surface them.
+ */
+export async function applyValidationToModelOutput(
+  response: string,
+): Promise<{ text: string; securityWarnings: string[] }> {
+  if (!response) return { text: response, securityWarnings: [] };
+
+  const result = await getResponseValidator().validate(response);
+
+  if (!result.safe) {
+    return { text: result.sanitized, securityWarnings: result.blocked };
+  }
+  if (result.warnings.length > 0) {
+    return { text: response, securityWarnings: result.warnings };
+  }
+  return { text: response, securityWarnings: [] };
+}

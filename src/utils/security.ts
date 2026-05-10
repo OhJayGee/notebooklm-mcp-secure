@@ -186,9 +186,15 @@ export function validateSessionId(id: string): string {
 
 /**
  * Validate question input
- * Prevents extremely long inputs that could cause DoS
+ * Prevents extremely long inputs that could cause DoS.
+ *
+ * @param maxLength Optional override for the maximum length. NotebookLM's
+ *                  ask_question default is 32000; deep_research is 10000;
+ *                  gemini_query is 30000. Callers pass their own ceiling
+ *                  rather than each handler reimplementing the
+ *                  empty-check + length-check + trim pattern inline.
  */
-export function validateQuestion(question: string): string {
+export function validateQuestion(question: string, maxLength: number = 32000): string {
   if (!question || typeof question !== 'string') {
     throw new SecurityError('Question is required and must be a string');
   }
@@ -199,10 +205,8 @@ export function validateQuestion(question: string): string {
     throw new SecurityError('Question cannot be empty');
   }
 
-  // Reasonable max length (NotebookLM has its own limits)
-  const MAX_QUESTION_LENGTH = 32000;
-  if (trimmed.length > MAX_QUESTION_LENGTH) {
-    throw new SecurityError(`Question too long (max ${MAX_QUESTION_LENGTH} characters)`);
+  if (trimmed.length > maxLength) {
+    throw new SecurityError(`Question too long (max ${maxLength} characters)`);
   }
 
   return trimmed;

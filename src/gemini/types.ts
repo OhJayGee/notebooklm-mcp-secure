@@ -138,6 +138,10 @@ export interface DeepResearchResult {
   error?: string;
   /** Time taken in milliseconds */
   durationMs?: number;
+  /** Deprecation warning if the model is retiring */
+  deprecationWarning?: string;
+  /** Response-validator warnings (prompt-injection / suspicious-URL detections) */
+  security_warnings?: string[];
 }
 
 /**
@@ -156,6 +160,8 @@ export interface GeminiQueryResult {
   toolsUsed?: string[];
   /** Deprecation warning if model is retiring */
   deprecationWarning?: string;
+  /** Response-validator warnings (prompt-injection / suspicious-URL detections) */
+  security_warnings?: string[];
 }
 
 // =============================================================================
@@ -277,6 +283,8 @@ export interface QueryDocumentResult {
   tokensUsed?: number;
   /** Files referenced in the query */
   filesUsed: string[];
+  /** Response-validator warnings (prompt-injection / suspicious-URL detections) */
+  security_warnings?: string[];
 }
 
 /**

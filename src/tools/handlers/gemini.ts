@@ -15,8 +15,12 @@ import { audit } from "../../utils/audit-logger.js";
 import {
   validateNotebookUrl,
   validateNotebookId,
+  validateQuestion,
+  validateSourceUrl,
   sanitizeForLogging,
+  SecurityError,
 } from "../../utils/security.js";
+import { applyValidationToModelOutput } from "../../utils/response-validator.js";
 import {
   resolveExportFilePath,
   assertSafeLocalReadPath,
@@ -75,12 +79,17 @@ export async function handleDeepResearch(
   }
 
   try {
-    // Validate query
-    if (!args.query || args.query.trim().length === 0) {
-      throw new Error("Query cannot be empty");
-    }
-    if (args.query.length > 10000) {
-      throw new Error("Query too long (max 10000 characters)");
+    // Validate query through the shared helper rather than re-implementing
+    // the empty-check + length-check inline. deep_research has historically
+    // capped at 10 000 characters; that ceiling is the maxLength argument.
+    let safeQuery: string;
+    try {
+      safeQuery = validateQuestion(args.query, 10000);
+    } catch (err) {
+      const errorMessage = err instanceof SecurityError
+        ? `Security validation failed: ${err.message}`
+        : err instanceof Error ? err.message : String(err);
+      return { success: false, data: null, error: errorMessage };
     }
 
     // Validate max_wait_seconds
@@ -93,7 +102,7 @@ export async function handleDeepResearch(
 
     // Start the research
     const interaction = await geminiClient.deepResearch({
-      query: args.query,
+      query: safeQuery,
       thinkingLevel: args.thinking_level,
       background: true,
       waitForCompletion: args.wait_for_completion !== false,
@@ -103,11 +112,16 @@ export async function handleDeepResearch(
 
     const durationMs = Date.now() - startTime;
 
-    // Extract the answer
-    const answer = interaction.outputs.find(o => o.type === "text")?.text || "";
+    // Extract the answer and run it through the response validator so
+    // prompt-injection / suspicious-URL patterns are caught the same way
+    // ask_question already does. Without this, a Gemini-generated payload
+    // containing a known-blocked pattern would round-trip back to the MCP
+    // client unsanitised.
+    const rawAnswer = interaction.outputs.find(o => o.type === "text")?.text || "";
+    const { text: answer, securityWarnings } = await applyValidationToModelOutput(rawAnswer);
 
     // Audit log
-    await audit.tool("deep_research", { query: sanitizeForLogging(args.query) }, true, durationMs);
+    await audit.tool("deep_research", { query: sanitizeForLogging(safeQuery) }, true, durationMs);
 
     log.success(`✅ [TOOL] deep_research completed in ${durationMs}ms`);
 
@@ -120,6 +134,7 @@ export async function handleDeepResearch(
         tokensUsed: interaction.usage?.totalTokens,
         durationMs,
         ...(interaction.deprecationWarning && { deprecationWarning: interaction.deprecationWarning }),
+        ...(securityWarnings.length > 0 && { security_warnings: securityWarnings }),
       },
     };
   } catch (error) {
@@ -170,12 +185,16 @@ export async function handleGeminiQuery(
   }
 
   try {
-    // Validate query
-    if (!args.query || args.query.trim().length === 0) {
-      throw new Error("Query cannot be empty");
-    }
-    if (args.query.length > 30000) {
-      throw new Error("Query too long (max 30000 characters)");
+    // Validate query through the shared helper. gemini_query has
+    // historically capped at 30 000 characters.
+    let safeQuery: string;
+    try {
+      safeQuery = validateQuestion(args.query, 30000);
+    } catch (err) {
+      const errorMessage = err instanceof SecurityError
+        ? `Security validation failed: ${err.message}`
+        : err instanceof Error ? err.message : String(err);
+      return { success: false, data: null, error: errorMessage };
     }
 
     // If URLs provided, auto-enable url_context
@@ -184,12 +203,20 @@ export async function handleGeminiQuery(
       tools = [...tools, "url_context"];
     }
 
-    // Validate URLs if provided
+    // Validate URLs through the shared validateSourceUrl. Pre-fix, the
+    // inline check accepted both http:// and https:// — Gemini would then
+    // fetch the http:// target, leaking the request to a passive observer.
+    // validateSourceUrl rejects non-HTTPS schemes and the dangerous
+    // protocol set (javascript:, data:, file:, …).
+    let safeUrls: string[] | undefined;
     if (args.urls) {
-      for (const url of args.urls) {
-        if (!url.startsWith("http://") && !url.startsWith("https://")) {
-          throw new Error(`Invalid URL: ${url} (must start with http:// or https://)`);
-        }
+      try {
+        safeUrls = args.urls.map((u) => validateSourceUrl(u));
+      } catch (err) {
+        const errorMessage = err instanceof SecurityError
+          ? `Security validation failed: ${err.message}`
+          : err instanceof Error ? err.message : String(err);
+        return { success: false, data: null, error: errorMessage };
       }
     }
 
@@ -204,18 +231,20 @@ export async function handleGeminiQuery(
     } : undefined;
 
     const interaction = await geminiClient.query({
-      query: args.query,
+      query: safeQuery,
       model: args.model,
       tools,
-      urls: args.urls,
+      urls: safeUrls,
       previousInteractionId: args.previous_interaction_id,
       generationConfig,
     });
 
     const durationMs = Date.now() - startTime;
 
-    // Extract the answer
-    const answer = interaction.outputs.find(o => o.type === "text")?.text || "";
+    // Extract the answer and run it through the response validator (same
+    // rationale as deep_research above).
+    const rawAnswer = interaction.outputs.find(o => o.type === "text")?.text || "";
+    const { text: answer, securityWarnings } = await applyValidationToModelOutput(rawAnswer);
 
     // Identify which tools were used
     const toolsUsed = interaction.outputs
@@ -225,7 +254,7 @@ export async function handleGeminiQuery(
 
     // Audit log
     await audit.tool("gemini_query", {
-      query: sanitizeForLogging(args.query),
+      query: sanitizeForLogging(safeQuery),
       model: args.model,
       tools: args.tools,
     }, true, durationMs);
@@ -241,6 +270,7 @@ export async function handleGeminiQuery(
         tokensUsed: interaction.usage?.totalTokens,
         toolsUsed: toolsUsed.length > 0 ? toolsUsed : undefined,
         ...(interaction.deprecationWarning && { deprecationWarning: interaction.deprecationWarning }),
+        ...(securityWarnings.length > 0 && { security_warnings: securityWarnings }),
       },
     };
   } catch (error) {
@@ -421,6 +451,10 @@ export async function handleQueryDocument(
       additionalFiles: args.additional_files,
     });
 
+    // Run the model output through the response validator (same rationale
+    // as deep_research / gemini_query above).
+    const { text: validatedAnswer, securityWarnings } = await applyValidationToModelOutput(result.answer);
+
     const durationMs = Date.now() - startTime;
     await audit.tool("query_document", { file: args.file_name, query: sanitizeForLogging(args.query) }, true, durationMs);
 
@@ -428,7 +462,11 @@ export async function handleQueryDocument(
 
     return {
       success: true,
-      data: result,
+      data: {
+        ...result,
+        answer: validatedAnswer,
+        ...(securityWarnings.length > 0 && { security_warnings: securityWarnings }),
+      },
     };
   } catch (error) {
     const errorMessage = getSanitizedErrorMessage(error);
@@ -553,6 +591,7 @@ export async function handleQueryChunkedDocument(
   tokensUsed?: number;
   chunksQueried: number;
   filesUsed: string[];
+  security_warnings?: string[];
 }>> {
   log.info(`🔧 [TOOL] query_chunked_document called`);
   log.info(`  Chunks: ${args.file_names.length}`);
@@ -584,16 +623,21 @@ export async function handleQueryChunkedDocument(
       { model: args.model }
     );
 
+    // Run the model output through the response validator (same rationale
+    // as deep_research / gemini_query above).
+    const { text: validatedAnswer, securityWarnings } = await applyValidationToModelOutput(result.answer);
+
     log.success(`✅ [TOOL] query_chunked_document completed`);
 
     return {
       success: true,
       data: {
-        answer: result.answer,
+        answer: validatedAnswer,
         model: result.model,
         tokensUsed: result.tokensUsed,
         chunksQueried: args.file_names.length,
         filesUsed: result.filesUsed,
+        ...(securityWarnings.length > 0 && { security_warnings: securityWarnings }),
       },
     };
   } catch (error) {
@@ -711,6 +755,7 @@ export async function handleGetNotebookChatHistory(
   returned_messages: number;
   user_messages: number;
   assistant_messages: number;
+  security_warnings?: string[];
   offset?: number;
   has_more?: boolean;
   output_file?: string;
@@ -865,6 +910,22 @@ export async function handleGetNotebookChatHistory(
         index: startIdx + idx,
       }));
 
+      // Run each scraped message's content through the response validator.
+      // Chat history is page-scraped from a NotebookLM notebook; a malicious
+      // user with control over the notebook contents can plant prompt-
+      // injection / suspicious-URL / encoded-payload patterns there. The
+      // ask_question handler already runs the same validator over its
+      // model output; chat history is the same shape of risk.
+      const aggregateWarnings: string[] = [];
+      const validatedMessages: typeof reindexedMessages = [];
+      for (const m of reindexedMessages) {
+        const { text, securityWarnings } = await applyValidationToModelOutput(m.content);
+        validatedMessages.push({ ...m, content: text });
+        if (securityWarnings.length > 0) {
+          aggregateWarnings.push(`message[${m.index}]: ${securityWarnings.join("; ")}`);
+        }
+      }
+
       // Export to file if requested. Path is constrained by the shared
       // export-path policy (NLMCP_EXPORT_DIR or $HOME), which also blocks
       // dotfile / sensitive-directory writes — without this, an MCP caller
@@ -897,7 +958,8 @@ export async function handleGetNotebookChatHistory(
           total_messages: totalMessages,
           user_messages: userMessages,
           assistant_messages: assistantMessages,
-          messages: reindexedMessages,
+          messages: validatedMessages,
+          ...(aggregateWarnings.length > 0 && { security_warnings: aggregateWarnings }),
         };
         // Refuse to clobber an existing file unless it is itself inside the
         // export base — defence-in-depth against accidental overwrites.
@@ -914,15 +976,16 @@ export async function handleGetNotebookChatHistory(
             notebook_url: notebookUrl,
             notebook_name: notebookName,
             total_messages: totalMessages,
-            returned_messages: reindexedMessages.length,
+            returned_messages: validatedMessages.length,
             user_messages: userMessages,
             assistant_messages: assistantMessages,
             output_file: safeOutputPath,
+            ...(aggregateWarnings.length > 0 && { security_warnings: aggregateWarnings }),
           },
         };
       }
 
-      log.success(`✅ [TOOL] get_notebook_chat_history completed (${reindexedMessages.length}/${totalMessages} messages)`);
+      log.success(`✅ [TOOL] get_notebook_chat_history completed (${validatedMessages.length}/${totalMessages} messages)`);
 
       return {
         success: true,
@@ -930,12 +993,13 @@ export async function handleGetNotebookChatHistory(
           notebook_url: notebookUrl,
           notebook_name: notebookName,
           total_messages: totalMessages,
-          returned_messages: reindexedMessages.length,
+          returned_messages: validatedMessages.length,
           user_messages: userMessages,
           assistant_messages: assistantMessages,
           offset: offset,
           has_more: hasMore,
-          messages: reindexedMessages,
+          messages: validatedMessages,
+          ...(aggregateWarnings.length > 0 && { security_warnings: aggregateWarnings }),
         },
       };
     } finally {

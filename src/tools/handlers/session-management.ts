@@ -8,6 +8,7 @@ import type { HandlerContext } from "./types.js";
 import type { ToolResult } from "../../types.js";
 import { CONFIG } from "../../config.js";
 import { log } from "../../utils/logger.js";
+import { validateSessionId, SecurityError } from "../../utils/security.js";
 import { getSanitizedErrorMessage } from "./error-utils.js";
 
 /**
@@ -76,20 +77,37 @@ type SessionOpResult = ToolResult<{ status: string; message: string; session_id:
 
 async function withSessionOp(
   toolName: string,
-  session_id: string,
-  action: () => Promise<{ ok: boolean; message: string }>
+  rawSessionId: string,
+  action: (safeSessionId: string) => Promise<{ ok: boolean; message: string }>
 ): Promise<SessionOpResult> {
   log.info(`🔧 [TOOL] ${toolName} called`);
-  log.info(`  Session ID: ${session_id}`);
+
+  // Validate the session_id format BEFORE doing anything with it. The pre-fix
+  // path passed args.session_id straight to the session manager, bypassing
+  // the same regex constraints that protect ask_question. A caller could
+  // pass a control-character or path-segment-style identifier and still hit
+  // every method of the session manager that takes a session_id.
+  let safeSessionId: string;
+  try {
+    safeSessionId = validateSessionId(rawSessionId);
+  } catch (err) {
+    const errorMessage = err instanceof SecurityError
+      ? `Security validation failed: ${err.message}`
+      : getSanitizedErrorMessage(err);
+    log.error(`🛡️ [TOOL] ${toolName} input rejected: ${errorMessage}`);
+    return { success: false, data: null, error: errorMessage };
+  }
+
+  log.info(`  Session ID: ${safeSessionId}`);
 
   try {
-    const result = await action();
+    const result = await action(safeSessionId);
     if (!result.ok) {
-      log.warning(`⚠️  [TOOL] Session ${session_id} not found`);
-      return { success: false, data: null, error: `Session ${session_id} not found` };
+      log.warning(`⚠️  [TOOL] Session ${safeSessionId} not found`);
+      return { success: false, data: null, error: `Session ${safeSessionId} not found` };
     }
     log.success(`✅ [TOOL] ${toolName} completed`);
-    return { success: true, data: { status: "success", message: result.message, session_id } };
+    return { success: true, data: { status: "success", message: result.message, session_id: safeSessionId } };
   } catch (error) {
     const errorMessage = getSanitizedErrorMessage(error);
     log.error(`❌ [TOOL] ${toolName} failed: ${errorMessage}`);
@@ -104,10 +122,10 @@ export function handleCloseSession(
   ctx: HandlerContext,
   args: { session_id: string }
 ): Promise<SessionOpResult> {
-  return withSessionOp("close_session", args.session_id, async () => {
-    const closed = await ctx.sessionManager.closeSession(args.session_id);
+  return withSessionOp("close_session", args.session_id, async (safeSessionId) => {
+    const closed = await ctx.sessionManager.closeSession(safeSessionId);
     return closed
-      ? { ok: true, message: `Session ${args.session_id} closed successfully` }
+      ? { ok: true, message: `Session ${safeSessionId} closed successfully` }
       : { ok: false, message: "" };
   });
 }
@@ -119,11 +137,11 @@ export function handleResetSession(
   ctx: HandlerContext,
   args: { session_id: string }
 ): Promise<SessionOpResult> {
-  return withSessionOp("reset_session", args.session_id, async () => {
-    const session = ctx.sessionManager.getSession(args.session_id);
+  return withSessionOp("reset_session", args.session_id, async (safeSessionId) => {
+    const session = ctx.sessionManager.getSession(safeSessionId);
     if (!session) return { ok: false, message: "" };
     await session.reset();
-    return { ok: true, message: `Session ${args.session_id} reset successfully` };
+    return { ok: true, message: `Session ${safeSessionId} reset successfully` };
   });
 }
 
