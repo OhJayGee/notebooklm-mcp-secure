@@ -461,12 +461,26 @@ export class SIEMExporter {
   }
 
   /**
-   * HTTP POST request
+   * HTTP POST request to the SIEM endpoint.
+   *
+   * The endpoint URL is validated through the same SSRF defence
+   * pipeline as `webhook-dispatcher.ts:validateWebhookUrl`. Same
+   * rationale as alert-manager.sendToWebhook: even though the URL
+   * is sourced from a trusted env var, applying the gate here keeps
+   * outbound-HTTP hardening uniform across every code path that
+   * issues network requests from the server.
    */
   private async httpPost(endpoint: string, body: string): Promise<boolean> {
+    const { validateOutboundUrlSync } = await import("../utils/url-validation.js");
+    const validation = validateOutboundUrlSync(endpoint);
+    if (!validation.ok) {
+      console.warn(`[SIEM] Refusing export to ${endpoint}: ${validation.error}`);
+      return false;
+    }
+
     return new Promise((resolve) => {
       try {
-        const url = new URL(endpoint);
+        const url = validation.url;
 
         const headers: Record<string, string> = {
           "Content-Type": "application/json",

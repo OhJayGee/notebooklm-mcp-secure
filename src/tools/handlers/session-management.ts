@@ -173,6 +173,24 @@ export async function handleGetHealth(
 > {
   log.info(`🔧 [TOOL] get_health called${args?.deep_check ? ' (deep check)' : ''}`);
 
+  // get_health is read-scope but `deep_check: true` spawns a real
+  // browser session and probes the chat UI — a side effect that does
+  // not belong in a read-scope tool. Splitting into a separate
+  // admin-gated tool would be invasive; the pragmatic guard is to
+  // require an explicit env-var opt-in for the deep-check flag.
+  // Admin tools that genuinely want a deep probe can enable
+  // NLMCP_DEEP_HEALTH_ENABLED=true; without it, deep_check is ignored
+  // and only the cheap introspection runs. This makes the side
+  // effect visible in deployment config rather than hidden in an
+  // optional tool argument.
+  const deepCheckRequested = args?.deep_check === true;
+  const deepCheckEnabled = process.env.NLMCP_DEEP_HEALTH_ENABLED === "true";
+  const performDeepCheck = deepCheckRequested && deepCheckEnabled;
+
+  if (deepCheckRequested && !deepCheckEnabled) {
+    log.warning("⚠️  [TOOL] get_health: deep_check requested but NLMCP_DEEP_HEALTH_ENABLED is not 'true'; ignoring");
+  }
+
   try {
     // Check authentication status
     const statePath = await ctx.authManager.getValidStatePath();
@@ -185,7 +203,7 @@ export async function handleGetHealth(
     let chatUiAccessible: boolean | undefined;
     let deepCheckNotebook: string | undefined;
 
-    if (args?.deep_check && authenticated) {
+    if (performDeepCheck && authenticated) {
       log.info(`  🔍 Running deep check - verifying chat UI loads...`);
 
       try {
@@ -268,12 +286,12 @@ export async function handleGetHealth(
       auto_login_enabled: CONFIG.autoLoginEnabled,
       stealth_enabled: CONFIG.stealthEnabled,
       // Include deep check results if performed
-      ...(args?.deep_check && {
+      ...(performDeepCheck && {
         chat_ui_accessible: chatUiAccessible,
         deep_check_notebook: deepCheckNotebook,
       }),
       // Add troubleshooting tip if not authenticated or chat UI not accessible
-      ...(((! authenticated) || (args?.deep_check && chatUiAccessible === false)) && {
+      ...(((! authenticated) || (performDeepCheck && chatUiAccessible === false)) && {
         troubleshooting_tip: chatUiAccessible === false
           ? "Chat UI not accessible. Session may be stale. Run re_auth(show_browser:true) to refresh."
           : "Not authenticated. Run setup_auth(show_browser:true) to log in via a visible browser window. " +

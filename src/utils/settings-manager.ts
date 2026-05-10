@@ -134,19 +134,37 @@ export class SettingsManager {
   }
 
   /**
-   * Save current settings to file
+   * Promise queue serialising saveSettings calls. Without this, two
+   * concurrent saveSettings invocations could read the same
+   * `this.settings`, merge their respective deltas, and race on the
+   * final write — the second writer's merge loses anything the
+   * first writer added that wasn't already in `this.settings` when
+   * the second call started.
+   *
+   * Same pattern WebhookDispatcher uses for its JSON store.
+   */
+  private saveQueue: Promise<void> = Promise.resolve();
+
+  /**
+   * Save current settings to file. Serialised through saveQueue so
+   * concurrent callers do not race on the read-merge-write cycle.
    */
   async saveSettings(newSettings: Partial<Settings>): Promise<void> {
-    this.settings = { ...this.settings, ...newSettings };
-    try {
-      writeFileSecure(
-        this.settingsPath,
-        JSON.stringify(this.settings, null, 2),
-        PERMISSION_MODES.OWNER_READ_WRITE
-      );
-    } catch (error) {
-      throw new Error(`Failed to save settings: ${error}`);
-    }
+    this.saveQueue = this.saveQueue
+      .catch(() => undefined)
+      .then(() => {
+        this.settings = { ...this.settings, ...newSettings };
+        try {
+          writeFileSecure(
+            this.settingsPath,
+            JSON.stringify(this.settings, null, 2),
+            PERMISSION_MODES.OWNER_READ_WRITE
+          );
+        } catch (error) {
+          throw new Error(`Failed to save settings: ${error}`);
+        }
+      });
+    await this.saveQueue;
   }
 
   /**

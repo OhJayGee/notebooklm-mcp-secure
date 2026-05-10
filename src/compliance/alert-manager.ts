@@ -247,7 +247,14 @@ export class AlertManager {
   }
 
   /**
-   * Send alert to webhook
+   * Send alert to webhook.
+   *
+   * The URL is validated through the same SSRF defence pipeline as
+   * `webhook-dispatcher.ts:validateWebhookUrl`. Even though
+   * NLMCP_ALERTS_WEBHOOK_URL is sourced from a trusted environment
+   * variable, applying the gate here closes the parity gap with the
+   * primary webhook delivery path: a future contributor copy-pasting
+   * from this file should not inherit a weaker pattern.
    */
   private async sendToWebhook(alert: Alert): Promise<boolean> {
     if (!this.config.channels.webhook?.url) {
@@ -255,7 +262,19 @@ export class AlertManager {
     }
 
     try {
-      const url = new URL(this.config.channels.webhook.url);
+      // Lazy import — keeps the alert-manager module free of a
+      // top-level dependency on the URL-validation helpers.
+      const { validateOutboundUrlSync } = await import("../utils/url-validation.js");
+      const validation = validateOutboundUrlSync(this.config.channels.webhook.url);
+      if (!validation.ok) {
+        // Soft-fail: the alert delivery has the same circuit-breaker
+        // shape as the primary dispatcher (returns false on any
+        // failure). We log a warning so an operator misconfiguration
+        // is observable.
+        console.warn(`[AlertManager] Refusing alert delivery to ${this.config.channels.webhook.url}: ${validation.error}`);
+        return false;
+      }
+      const url = validation.url;
 
       // Format message for common webhook services
       const body = this.formatWebhookBody(alert);

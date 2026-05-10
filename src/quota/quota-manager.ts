@@ -98,13 +98,36 @@ export class QuotaManager {
   }
 
   /**
-   * Load settings from disk or create defaults
+   * Load settings from disk, validating the parsed shape before
+   * trusting it.
+   *
+   * Persisted state is treated as untrusted on read across this
+   * codebase (see notebook-library, webhook store). Quota state is
+   * the residual: a local user (or malware running as the user)
+   * could edit `quota.json` to set `queriesUsedToday: 0` and bypass
+   * rate limits. This validator catches obviously-tampered or
+   * obviously-malformed records — any field out of plausible range
+   * causes a fall-through to `getDefaultSettings()`, which is the
+   * safe (most-restrictive) state.
+   *
+   * Trade-off: a legitimate edge case (clock skew, partial write
+   * during crash) might also fall through to defaults. That's
+   * acceptable — the daily reset code path will repopulate the
+   * record on the next call.
    */
   private loadSettings(): QuotaSettings {
     try {
       if (fs.existsSync(this.settingsPath)) {
         const data = fs.readFileSync(this.settingsPath, "utf-8");
-        const loaded = JSON.parse(data) as QuotaSettings;
+        const loaded = JSON.parse(data) as unknown;
+
+        if (!QuotaManager.isValidQuotaSettings(loaded)) {
+          log.warning(
+            "⚠️  quota.json failed schema validation; falling back to defaults",
+          );
+          return this.getDefaultSettings();
+        }
+
         log.info(`📊 Loaded quota settings (tier: ${loaded.tier})`);
         return loaded;
       }
@@ -114,6 +137,64 @@ export class QuotaManager {
 
     // Return defaults
     return this.getDefaultSettings();
+  }
+
+  /**
+   * Validate a parsed quota record against the expected schema.
+   *
+   * Catches the obvious tampering / malformed-write cases without
+   * trying to be cryptographically tamper-proof:
+   *   - Tier is one of the four valid values.
+   *   - Usage counters are non-negative numbers below a sane ceiling.
+   *   - Date fields are present and ISO-formatted.
+   *   - Limits structure is present with non-negative numbers.
+   *
+   * This is intentionally lenient: valid older releases that wrote
+   * a smaller field set continue to load. The point is to refuse
+   * impossible-looking values.
+   */
+  private static isValidQuotaSettings(loaded: unknown): loaded is QuotaSettings {
+    if (typeof loaded !== "object" || loaded === null) return false;
+    const o = loaded as Record<string, unknown>;
+
+    // tier
+    if (typeof o.tier !== "string" || !["free", "pro", "ultra", "unknown"].includes(o.tier)) {
+      return false;
+    }
+
+    // limits — must be an object with non-negative numbers under a ceiling
+    const limits = o.limits as Record<string, unknown> | undefined;
+    if (!limits || typeof limits !== "object") return false;
+    const limitFields = ["notebooks", "sourcesPerNotebook", "wordsPerSource", "queriesPerDay"];
+    for (const f of limitFields) {
+      const v = limits[f];
+      if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 10_000_000) {
+        return false;
+      }
+    }
+
+    // usage — must be an object with sane counters
+    const usage = o.usage as Record<string, unknown> | undefined;
+    if (!usage || typeof usage !== "object") return false;
+    if (typeof usage.notebooks !== "number" || !Number.isFinite(usage.notebooks) ||
+        usage.notebooks < 0 || usage.notebooks > 1_000_000) {
+      return false;
+    }
+    if (typeof usage.queriesUsedToday !== "number" || !Number.isFinite(usage.queriesUsedToday) ||
+        usage.queriesUsedToday < 0 || usage.queriesUsedToday > 1_000_000) {
+      return false;
+    }
+    if (typeof usage.lastQueryDate !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(usage.lastQueryDate)) {
+      return false;
+    }
+    if (typeof usage.lastUpdated !== "string") return false;
+
+    // autoDetected — boolean (defaults to false if missing)
+    if (o.autoDetected !== undefined && typeof o.autoDetected !== "boolean") {
+      return false;
+    }
+
+    return true;
   }
 
   /**
