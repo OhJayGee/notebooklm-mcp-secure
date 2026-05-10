@@ -36,7 +36,14 @@ describe("tool file path safety", () => {
   });
 
   it("allows export_library relative paths inside the export base", async () => {
-    const exportDir = fs.mkdtempSync(path.join(os.tmpdir(), "nlmcp-export-"));
+    // realpathSync the tmp dir: macOS firmlinks /var → /private/var, and
+    // resolveExportFilePath now realpath-resolves the export base before
+    // containment, so the returned file_path is in canonical form.
+    // Comparing against the unresolved os.tmpdir() string would fail
+    // even though both paths name the same file.
+    const exportDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "nlmcp-export-")),
+    );
     process.env.NLMCP_EXPORT_DIR = exportDir;
 
     const ctx = {
