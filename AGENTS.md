@@ -167,6 +167,8 @@ paths, `.config/...` for Linux, `AppData/Roaming/...` or
 
 ## URL validation conventions
 
+Three modules, three layers:
+
 `src/utils/security.ts`:
 
 - `validateNotebookUrl(url)` → for navigation URLs. Allowlists the
@@ -179,6 +181,40 @@ paths, `.config/...` for Linux, `AppData/Roaming/...` or
   `about:`), enforces HTTPS, but otherwise permissive on host (a
   "source" can legitimately be any third-party page).
 
+`src/utils/url-validation.ts` (shared SSRF defence helpers, factored
+in v2026.3.5 from the webhook-dispatcher's inline logic):
+
+- `isPrivateIPv4(addr)` / `isPrivateIPv6(addr)` / `isPrivateHost(host)`
+  — synchronous lexical checks. Cover loopback, link-local (incl.
+  AWS/GCP metadata 169.254/16), RFC 1918, RFC 6598 CGNAT, multicast,
+  IPv4-mapped IPv6, and the `localhost` / `*.local` / `*.internal`
+  family.
+- `validateOutboundUrl(url, { allowHttp?, resolveDns?, dnsTimeoutMs? })`
+  — async URL gate. Parses, enforces scheme, applies the private-host
+  check lexically, and (when `resolveDns: true`) resolves the host
+  and re-checks every resulting IP. Use this for code paths that can
+  await; webhook-dispatcher uses it with `resolveDns: true` at both
+  config time and send time (DNS rebinding defence).
+- `validateOutboundUrlSync(url, { allowHttp? })` — synchronous
+  variant for code paths that can't await. Used by `alert-manager.ts`
+  and `siem-exporter.ts` before `https.request`.
+- `validateNotebookLMMediaUrl(url)` — strictest variant. Use ONLY for
+  URLs scraped from the browser DOM that the server is about to
+  navigate to via `page.goto(...)`. HTTPS only + no private/loopback
+  IPs + hostname suffix on a hard-coded NotebookLM media-download
+  allowlist (`*.google.com`, `*.googleusercontent.com`,
+  `*.googleapis.com`). Calling `page.goto` on a DOM-scraped URL
+  without this gate is an SSRF — a prompt-injection chain through a
+  malicious source document can plant `<a download href="file:///
+  etc/passwd">` and the authenticated browser will follow it. See
+  v2026.3.5 CRITICAL fix in `audio-manager.downloadAudio`.
+
+**Rule:** every code path that issues outbound HTTP (or navigates a
+browser context to an attacker-influenced URL) MUST go through one
+of the helpers above. Never issue `https.request`, `fetch`, or
+`page.goto` against a string the server didn't originate or fully
+validate.
+
 ## Credential lifecycle
 
 `LOGIN_PASSWORD` and `GEMINI_API_KEY` are read once from `process.env`
@@ -186,6 +222,13 @@ into a `SecureCredential` (5-min TTL) at config-load time, then the
 env vars are deleted via `delete process.env.X`. Consumers go
 through `getSecureLoginPassword()` / `getSecureGeminiApiKey()` and
 must `.wipe()` on shutdown / error paths.
+
+The shutdown handler in `src/index.ts` calls
+`wipeGlobalCredentials()` (exported from `src/config.ts`) on every
+exit path — SIGINT, SIGTERM, uncaughtException, unhandledRejection,
+and the error-recovery path inside `shutdown()` itself. This is
+mandatory; `SecureCredential.wipe()` is idempotent so over-calling
+is safe.
 
 If you add a new credential env var:
 
@@ -196,6 +239,8 @@ If you add a new credential env var:
 4. Audit-log a `secrets_*` event when the credential is consumed.
 5. Add the env var name to the secrets-scanner pattern set if it
    matches a recognisable token shape.
+6. Extend `wipeGlobalCredentials()` in `src/config.ts` to wipe the
+   new holder.
 
 ## Crypto invariants
 
@@ -215,16 +260,40 @@ above spells this out.
 Hash-chained per-day file with cross-day chain linkage. Tampering is
 detected on read (`AuditLogger.verifyIntegrity()`).
 
+**Hash-chain invariant (v2026.3.5):** the chain link
+(`previousHash` → `hash`) is stamped INSIDE `flushEvent` under the
+per-day file lock — NOT in `log()` before enqueueing. This ensures
+two concurrent `log()` calls produce events whose chain reflects
+actual write order, not the order of the now-asynchronous `log()`
+invocations. Pre-fix this race surfaced as confusing "Hash chain
+broken" errors that weren't actually tampering. **Don't move the
+hash computation back into `log()` — the regression test
+`tests/external-review-round4-fixes.test.ts` will catch it.**
+
 Rules of thumb:
 
 - Every tool call: `audit.tool(name, args, success, duration_ms,
-  error?)`.
+  error?)`. **All admin-scope tools must audit, including library
+  mutations** (`add_notebook`, `update_notebook`, `remove_notebook`,
+  `select_notebook`). Pre-v2026.3.5 the four library handlers were
+  silent; now they're not.
 - Every auth event: `audit.auth(event, success, details?)`.
 - Every security event: `audit.security(event, severity, details?)`.
 - Sanitise free-text inputs before logging via `sanitizeForLogging`.
 - Never log a literal token, password, or auth header value.
   `summarizeArgs` and the secrets-scanner are defence-in-depth, not a
   license to be careless.
+- **URL fields in audit records: log host only, never the full URL.**
+  Slack/Discord/Teams webhook URLs embed credential tokens in the
+  path; `recordWebhookChange` and `safeNotebookHost` (in
+  `notebook-management.ts`) are the canonical patterns.
+
+**Shutdown flush is mandatory.** The shutdown handler in
+`src/index.ts` awaits `getAuditLogger().flush()` AND
+`getQueryLogger().flush()` before `process.exit(0)`. Without this,
+events queued in the final ms are lost (the loggers' own
+`beforeExit` handlers don't fire on `process.exit`). Don't remove
+either flush.
 
 ## Webhooks
 
@@ -234,21 +303,30 @@ points: at config time (`validateWebhookUrl` in `addWebhook` /
 inside `sendWithRetry`). Both are needed — DNS rebinding can move a
 host between RFC 1918 and public space between config and send.
 
-When adding a new outbound HTTP surface elsewhere in the codebase,
-route through the same `validateWebhookUrl` (or factor it into a
-shared `validateOutboundUrl` if the use case is a
-config-but-not-webhook URL).
+`list_webhooks` returns a redacted `WebhookConfigPublic` DTO (host
+only + `hasSecret` boolean), never the full `WebhookConfig`. The
+full URL would leak Slack/Discord/Teams credential tokens to
+read-scope callers. `WebhookDispatcher.loadStore()` migrates any
+legacy persisted `secret` field into the in-memory
+`webhookSecrets` SecureCredential map and scrubs the persisted
+record (idempotent). `WebhookDispatcher.whenInitialized()` is
+exposed so callers (and the MCP `list_webhooks` handler) can wait
+for env-driven init to settle before observing the store.
 
-`alert-manager.ts` and `siem-exporter.ts` currently take URLs from
-env vars (trusted) and skip validation. Don't widen them to
-non-env-var sources without adding `validateWebhookUrl` first.
+**Outbound HTTP rule (v2026.3.5):** every code path that issues
+outbound HTTP — webhook delivery, alert-manager, SIEM exporter,
+audio-download navigation — uses one of the helpers from
+`src/utils/url-validation.ts`. `alert-manager.ts` and
+`siem-exporter.ts` use `validateOutboundUrlSync` even though their
+URLs come from env vars (defence-in-depth + codebase consistency).
+When adding any new outbound HTTP surface, do the same.
 
 ## Build / test / verify
 
 ```bash
 npm ci --ignore-scripts          # install deps without lifecycle scripts
 npx tsc --noEmit                 # type-check (must produce no output)
-npx vitest run                   # full test suite (775+ tests, all must pass)
+npx vitest run                   # full test suite (837+ tests, all must pass)
 npx vitest run --coverage        # coverage report under coverage/
 node ./scripts/check-exact-pins.cjs  # pin-enforcement gate
 npm run build                    # tsc + chmod
@@ -318,19 +396,49 @@ shipping a Dockerfile that's not actually used confuses operators.
 Process:
 
 1. Save the verbatim report into `docs/security-reviews/` as
-   `<REVIEWER>_<ROUND>.md`.
+   `<REVIEWER>_<ROUND>.md` or `<REVIEWER>-FULL-REVIEW-V<version>.md`.
+   Don't paraphrase or "tidy up" the report — verbatim is the point.
 2. Add a row to `docs/security-reviews/README.md` indexing the new
    report.
 3. Deduplicate findings across reviewers, filter to confidence ≥ 7.
 4. For each genuine finding, write the code fix AND a regression
    test that pins the fix.
-5. Append a "Security — External Review Findings Addressed"
-   subsection to the current release's CHANGELOG entry, listing every
-   fix.
-6. Verify with `npx tsc --noEmit` and `npx vitest run`.
+5. Cut a new minor release (e.g. v2026.3.X+1). Append a "Whole-Repo
+   External Review (Round N)" subsection to the new CHANGELOG entry,
+   listing every fix with severity, finding source, conf, and a
+   one-paragraph mechanism description.
+6. Verify with `npx tsc --noEmit` and `npx vitest run` after every
+   batch of fixes.
 
-The two prior rounds (the v2026.3.3 work, captured in
-`docs/security-reviews/`) are the canonical examples of this process.
+The four prior rounds (v2026.3.3 — initial CLAUDE_REVIEW + CODEX_REVIEW,
+v2026.3.4 — first whole-repo round CODEX_FULL_FINDINGS +
+GEMINI31Pro_FULL_FINDINGS, v2026.3.5 — second whole-repo round
+CLAUDE-FULL-REVIEW-V2026.3.4 + CODEX_FULL_FINDINGS-V2026.3.4 +
+GEMINI31Pro_FULL_FINDINGS-V2) are the canonical examples of this
+process. Each round produces fewer findings than the last, but
+every round has produced at least one real bug — including
+v2026.3.5's CRITICAL audio-SSRF that three rounds missed.
+
+**Commit structure for a review round** (battle-tested across four
+releases):
+
+1. `fix(security): <CRITICAL/HIGH bundle>` — the highest-severity
+   findings as one commit each or grouped by area.
+2. `fix(security): <medium bundle>` — medium-severity findings
+   bundled by area (e.g. "library audit + shutdown flush").
+3. `fix(security): <low bundle>` — low-severity findings bundled.
+4. `test+docs: regression tests + verbatim review reports` — the
+   regression tests file plus the verbatim review reports + any
+   `docs/security-reviews/README.md` index update.
+5. `release: vX.Y.Z — <round summary>` — package.json + server.json
+   version bump + CHANGELOG entry + README "What's New" update.
+
+Then `git tag -s vX.Y.Z`, `git push origin main`, `git push origin
+vX.Y.Z`, `gh release create vX.Y.Z --repo OhJayGee/...`.
+
+**Note on `gh release create`:** pass `--repo OhJayGee/notebooklm-mcp-secure`
+explicitly. Without it, `gh` defaults to the upstream remote
+(`Pantheon-Security/...`) which fails with "tag does not exist".
 
 ## Common foot-guns to avoid
 
@@ -347,7 +455,40 @@ The two prior rounds (the v2026.3.3 work, captured in
 - **Don't** call `fs.readFile` / `fs.createReadStream` /
   `setInputFiles` in a tool handler with a caller-supplied path.
   Route through `assertSafeLocalReadPath` first.
+- **Don't** call `page.goto(...)` / `fetch(...)` / `https.request(...)`
+  with an attacker-influenced URL. Route through the appropriate
+  `url-validation.ts` helper:
+    - DOM-scraped URLs the browser will navigate to →
+      `validateNotebookLMMediaUrl`
+    - User-configured webhook URL → `validateWebhookUrl` (in
+      webhook-dispatcher.ts) at config AND send time
+    - Env-configured outbound URLs → `validateOutboundUrlSync`
+- **Don't** capture `this.previousHash` in `AuditLogger.log()` and
+  pass it through to `flushEvent`. The hash chain link MUST be
+  stamped inside `flushEvent` under the file lock — otherwise
+  concurrent `log()` calls produce a branched chain. The regression
+  tests in `tests/external-review-round4-fixes.test.ts` (Finding
+  G2) will catch a regression here immediately.
+- **Don't** return raw `err.message` to MCP clients. Route through
+  `getSanitizedErrorMessage` from `src/tools/handlers/error-utils.ts`.
+  This strips both absolute paths AND stack-frame fragments.
+  Especially important for `PathPolicyError` returns.
+- **Don't** `process.exit(0)` from a shutdown handler without first
+  awaiting `getAuditLogger().flush()` and `getQueryLogger().flush()`.
+  `process.exit` doesn't trigger `beforeExit` (Node docs explicit),
+  so events queued in the final ms get lost — and a missing event
+  silently breaks hash-chain verification on the next run.
+- **Don't** add a new admin-scope tool without `audit.tool(...)`.
+  The library handlers (add/update/remove/select_notebook) were the
+  canonical "missed audit" example before v2026.3.5.
+- **Don't** `https.request` directly anywhere. Use
+  `validateOutboundUrlSync` (from `src/utils/url-validation.ts`)
+  before issuing the request, even for env-trusted URLs.
 - **Don't** trust persisted data without re-validating it on read.
+  Examples that DO this: notebook library, webhook config (legacy
+  secret scrub), audit log (hash chain), quota state (schema
+  validator). When you add a new persisted store, follow the same
+  pattern.
 - **Don't** widen the `enterpriseCompliance` or `securityHardening`
   blocks in `package.json` with marketing-grade booleans. Each entry
   must describe its actual mechanism.
@@ -358,9 +499,44 @@ The two prior rounds (the v2026.3.3 work, captured in
 - **Don't** delete the `// Added by Pantheon Security for hardened
   fork.` source comments. They're historical attribution under the
   MIT licence.
+- **Don't** issue `gh release create` without `--repo
+  OhJayGee/notebooklm-mcp-secure`. The default uses the upstream
+  remote and fails with "tag does not exist".
+
+## Patterns that have proved load-bearing
+
+These are conventions established across the v2026.3.3 → v2026.3.5
+review rounds. Don't change them without first checking that the
+corresponding regression test still passes:
+
+- **Persisted-state validation on read.** Every store re-validates
+  on load and falls through to a safe default on rejection.
+  `NotebookLibrary.loadLibrary`, `WebhookDispatcher.loadStore`,
+  `QuotaManager.loadSettings`, and the audit log's hash-chain
+  verification all follow this shape.
+- **Two-tier URL validation: config-time + send-time.** Webhook
+  URLs are validated when added AND before each delivery (DNS
+  rebinding defence). Notebook URLs are validated at every library
+  write AND at every browser navigation.
+- **Hash chain inside the lock.** Audit-log chain links are stamped
+  inside the file-lock critical section, not pre-enqueue.
+- **Response validation factored shared.**
+  `applyValidationToModelOutput(text)` from
+  `src/utils/response-validator.ts` is the single helper used by
+  `ask_question`, all four Gemini handlers, and per-message inside
+  `get_notebook_chat_history`. New handlers that return model
+  output go through this.
+- **Audit URL fields are host-only.** Every audit record that
+  references a URL logs the host, not the full URL.
+  `safeNotebookHost` (in `notebook-management.ts`) and
+  `safeHost` (in `webhook-dispatcher.ts`) are the two helpers.
 
 ## When in doubt
 
-The two prior review rounds in `docs/security-reviews/` are the
-authoritative record of what's been considered. The CHANGELOG entry
-for v2026.3.3 has the per-finding map.
+The four prior review rounds in `docs/security-reviews/` are the
+authoritative record of what's been considered. The CHANGELOG
+entries for v2026.3.3, v2026.3.4, and v2026.3.5 have the per-finding
+fix maps. When in real doubt about a security-shaped change, run
+the toned-down Template 2 prompt from
+`docs/security-reviews/REVIEW_PROMPT_TEMPLATE.md` against an
+external reviewer before shipping.
