@@ -225,27 +225,73 @@ export class MCPAuthenticator {
   }
 
   /**
-   * Print token setup instructions to stderr
+   * Print token setup instructions.
+   *
+   * The full token is printed only when stderr is an interactive TTY —
+   * the only context where the operator is actually watching the output.
+   * In non-TTY contexts (Claude Code launching the server, Docker
+   * containers logging to a file/journal, CI pipelines) the token is
+   * written to a 0600 file alongside the hash, and only the path is
+   * printed. Avoids leaking bearer tokens to:
+   *   - IDE log viewers / shell scrollback
+   *   - container log aggregators / `docker logs`
+   *   - any future MCP client that captures stderr to a transcript
+   *
+   * The on-disk file uses owner-only perms (0o600). Operators who want
+   * the on-screen behaviour can set NLMCP_PRINT_TOKEN_TO_STDERR=true.
    */
   private printTokenInstructions(token: string): void {
-    log.info("");
-    log.info("  ╔══════════════════════════════════════════════════════════════════════╗");
-    log.info("  ║  MCP AUTHENTICATION TOKEN                                           ║");
-    log.info("  ╠══════════════════════════════════════════════════════════════════════╣");
-    log.info(`  ║  Token: ${token.padEnd(58)}║`);
-    log.info("  ╠══════════════════════════════════════════════════════════════════════╣");
-    log.info("  ║  Add to your MCP client config:                                     ║");
-    log.info(`  ║    NLMCP_AUTH_TOKEN=${token.padEnd(47)}║`);
-    log.info("  ║                                                                      ║");
-    log.info("  ║  Or for Claude Code:                                                 ║");
-    log.info(`  ║    claude mcp add notebooklm \\${" ".repeat(37)}║`);
-    log.info(`  ║      --env NLMCP_AUTH_TOKEN=${token} \\${" ".repeat(Math.max(0, 36 - token.length))}║`);
-    log.info(`  ║      npx notebooklm-mcp-secure${" ".repeat(37)}║`);
-    log.info("  ║                                                                      ║");
-    log.info("  ║  Lost your token? Run: npx notebooklm-mcp token show                ║");
-    log.info("  ║  Rotate token:         npx notebooklm-mcp token rotate               ║");
-    log.info("  ╚══════════════════════════════════════════════════════════════════════╝");
-    log.info("");
+    const isTty = !!process.stderr.isTTY;
+    const forcePrint = process.env.NLMCP_PRINT_TOKEN_TO_STDERR === "true";
+
+    if (isTty || forcePrint) {
+      log.info("");
+      log.info("  ╔══════════════════════════════════════════════════════════════════════╗");
+      log.info("  ║  MCP AUTHENTICATION TOKEN                                           ║");
+      log.info("  ╠══════════════════════════════════════════════════════════════════════╣");
+      log.info(`  ║  Token: ${token.padEnd(58)}║`);
+      log.info("  ╠══════════════════════════════════════════════════════════════════════╣");
+      log.info("  ║  Add to your MCP client config:                                     ║");
+      log.info(`  ║    NLMCP_AUTH_TOKEN=${token.padEnd(47)}║`);
+      log.info("  ║                                                                      ║");
+      log.info("  ║  Or for Claude Code:                                                 ║");
+      log.info(`  ║    claude mcp add notebooklm \\${" ".repeat(37)}║`);
+      log.info(`  ║      --env NLMCP_AUTH_TOKEN=${token} \\${" ".repeat(Math.max(0, 36 - token.length))}║`);
+      log.info(`  ║      npx notebooklm-mcp-secure${" ".repeat(37)}║`);
+      log.info("  ║                                                                      ║");
+      log.info("  ║  Lost your token? Run: npx notebooklm-mcp token show                ║");
+      log.info("  ║  Rotate token:         npx notebooklm-mcp token rotate               ║");
+      log.info("  ╚══════════════════════════════════════════════════════════════════════╝");
+      log.info("");
+      return;
+    }
+
+    // Non-TTY path: write the token to a 0o600 file so an operator can
+    // recover it once, and log only the path (which is safe to leak).
+    const tokenPath = path.join(path.dirname(this.config.tokenFile), "auth-token.value");
+    try {
+      writeFileSecure(tokenPath, token, PERMISSION_MODES.OWNER_READ_WRITE);
+      log.info("");
+      log.info("  ╔══════════════════════════════════════════════════════════════════════╗");
+      log.info("  ║  MCP AUTHENTICATION TOKEN GENERATED                                  ║");
+      log.info("  ╠══════════════════════════════════════════════════════════════════════╣");
+      log.info(`  ║  Token written to (0600): ${tokenPath.padEnd(40).slice(0, 40)}║`);
+      log.info("  ║                                                                      ║");
+      log.info("  ║  Read it once, then delete the file:                                ║");
+      log.info(`  ║    cat <token-file> && rm <token-file>${" ".repeat(28)}║`);
+      log.info("  ║                                                                      ║");
+      log.info("  ║  To print the token to stderr instead, restart with                  ║");
+      log.info("  ║    NLMCP_PRINT_TOKEN_TO_STDERR=true                                  ║");
+      log.info("  ╚══════════════════════════════════════════════════════════════════════╝");
+      log.info("");
+    } catch (err) {
+      // If we can't write the file we have no safe way to surface the
+      // token. Refuse to log it; force the operator to rotate from a TTY.
+      log.error(
+        `Failed to write token file at ${tokenPath}: ${err instanceof Error ? err.message : String(err)}. ` +
+        `The new token is unrecoverable; run 'npx notebooklm-mcp token rotate' from an interactive shell.`,
+      );
+    }
   }
 
   /**
@@ -638,18 +684,46 @@ export async function handleTokenCommand(args: string[]): Promise<void> {
     await auth.initialize();
     const newToken = await auth.rotateToken();
 
-    console.log("");
-    console.log("  ╔══════════════════════════════════════════════════════════════════════╗");
-    console.log("  ║  TOKEN ROTATED SUCCESSFULLY                                          ║");
-    console.log("  ╠══════════════════════════════════════════════════════════════════════╣");
-    console.log(`  ║  New Token: ${newToken.padEnd(55)}║`);
-    console.log("  ╠══════════════════════════════════════════════════════════════════════╣");
-    console.log("  ║  Update your MCP client config:                                      ║");
-    console.log(`  ║    NLMCP_AUTH_TOKEN=${newToken.padEnd(47)}║`);
-    console.log("  ║                                                                      ║");
-    console.log("  ║  Any previous token is now invalid.                                   ║");
-    console.log("  ╚══════════════════════════════════════════════════════════════════════╝");
-    console.log("");
+    // Same TTY policy as printTokenInstructions: print the full token only
+    // when stdout is an interactive terminal. In every other context
+    // (subprocess, IDE shell, CI capture) write to a 0600 file. The
+    // intent is that `token rotate` is normally run by a human at a
+    // terminal — when it isn't, we don't leak the token to logs.
+    const isTty = !!process.stdout.isTTY;
+    const forcePrint = process.env.NLMCP_PRINT_TOKEN_TO_STDERR === "true";
+
+    if (isTty || forcePrint) {
+      console.log("");
+      console.log("  ╔══════════════════════════════════════════════════════════════════════╗");
+      console.log("  ║  TOKEN ROTATED SUCCESSFULLY                                          ║");
+      console.log("  ╠══════════════════════════════════════════════════════════════════════╣");
+      console.log(`  ║  New Token: ${newToken.padEnd(55)}║`);
+      console.log("  ╠══════════════════════════════════════════════════════════════════════╣");
+      console.log("  ║  Update your MCP client config:                                      ║");
+      console.log(`  ║    NLMCP_AUTH_TOKEN=${newToken.padEnd(47)}║`);
+      console.log("  ║                                                                      ║");
+      console.log("  ║  Any previous token is now invalid.                                   ║");
+      console.log("  ╚══════════════════════════════════════════════════════════════════════╝");
+      console.log("");
+    } else {
+      const tokenValuePath = path.join(CONFIG.configDir, "auth-token.value");
+      try {
+        writeFileSecure(tokenValuePath, newToken, PERMISSION_MODES.OWNER_READ_WRITE);
+        console.log("");
+        console.log("  Token rotated. New token written to (0600):");
+        console.log(`    ${tokenValuePath}`);
+        console.log("");
+        console.log("  Read it once, then delete the file. To print to stdout instead,");
+        console.log("  set NLMCP_PRINT_TOKEN_TO_STDERR=true.");
+        console.log("");
+      } catch (err) {
+        console.error(
+          `Failed to write token file at ${tokenValuePath}: ${err instanceof Error ? err.message : String(err)}. ` +
+          `Run again from an interactive terminal to receive the new token.`,
+        );
+        process.exit(1);
+      }
+    }
   } else {
     console.log(`
 Usage: npx notebooklm-mcp token <command>

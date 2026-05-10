@@ -569,7 +569,18 @@ export class SecureStorage {
   }
 
   /**
-   * Save data to an encrypted file
+   * Save data to an encrypted file.
+   *
+   * Fails closed: when encryption is configured but no key is available
+   * (or initialization failed), this method refuses to silently write
+   * plaintext to disk. The previous behaviour was to fall back to
+   * `writeFileSecure(plaintext)`, which is a poor failure mode for files
+   * that hold session cookies, sessionStorage, or auth state.
+   *
+   * To explicitly opt into plaintext storage (e.g. on a fully encrypted
+   * volume), set `NLMCP_ALLOW_PLAINTEXT_CREDENTIAL_STORAGE=true`. The
+   * setting is logged loudly at every save so it cannot be enabled by
+   * accident.
    */
   async save(filePath: string, data: string | object): Promise<void> {
     await this.initialize();
@@ -580,10 +591,22 @@ export class SecureStorage {
     // Ensure directory exists with secure permissions
     mkdirSecure(dir, PERMISSION_MODES.OWNER_FULL);
 
+    const allowPlaintext = process.env.NLMCP_ALLOW_PLAINTEXT_CREDENTIAL_STORAGE === "true";
+
     if (!this.config.enabled) {
-      // Save unencrypted
+      if (!allowPlaintext) {
+        const msg =
+          `secure storage refusing to write plaintext for ${path.basename(filePath)}: ` +
+          `encryption is disabled and NLMCP_ALLOW_PLAINTEXT_CREDENTIAL_STORAGE is not set to "true". ` +
+          `Either configure NLMCP_ENCRYPTION_KEY / a machine key, or opt in explicitly.`;
+        await audit.security("plaintext_save_refused", "error", {
+          file: path.basename(filePath),
+          reason: "encryption_disabled",
+        });
+        throw new Error(msg);
+      }
+      log.warning(`⚠️ Saved unencrypted (NLMCP_ALLOW_PLAINTEXT_CREDENTIAL_STORAGE=true): ${path.basename(filePath)}`);
       writeFileSecure(filePath, dataStr, PERMISSION_MODES.OWNER_READ_WRITE);
-      log.info(`📝 Saved (unencrypted): ${path.basename(filePath)}`);
       return;
     }
 
@@ -600,9 +623,20 @@ export class SecureStorage {
       encryptedPath = filePath + ".enc";
       log.info(`🔐 Saved with ChaCha20-Poly1305: ${path.basename(encryptedPath)}`);
     } else {
-      // Save unencrypted as fallback
+      // No key available. Fail closed unless the operator has explicitly
+      // opted into plaintext storage.
+      if (!allowPlaintext) {
+        const msg =
+          `secure storage refusing to write plaintext for ${path.basename(filePath)}: ` +
+          `no encryption key available and NLMCP_ALLOW_PLAINTEXT_CREDENTIAL_STORAGE is not set to "true".`;
+        await audit.security("plaintext_save_refused", "error", {
+          file: path.basename(filePath),
+          reason: "no_key_available",
+        });
+        throw new Error(msg);
+      }
+      log.warning(`⚠️ Saved unencrypted (no keys, NLMCP_ALLOW_PLAINTEXT_CREDENTIAL_STORAGE=true): ${path.basename(filePath)}`);
       writeFileSecure(filePath, dataStr, PERMISSION_MODES.OWNER_READ_WRITE);
-      log.warning(`⚠️ Saved unencrypted (no keys): ${path.basename(filePath)}`);
       return;
     }
 

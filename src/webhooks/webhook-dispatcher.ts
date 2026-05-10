@@ -452,6 +452,30 @@ export class WebhookDispatcher {
       return false;
     }
 
+    // Re-validate the URL at delivery time, not just at configuration
+    // time. A domain that resolved to a public IP when the webhook was
+    // added can later resolve to 169.254.169.254, loopback, or RFC 1918
+    // space — classic DNS-rebinding. `validateWebhookUrl` re-runs the
+    // DNS lookup and re-checks every resolved address against the
+    // private-range list. The result is then thrown away (we still let
+    // `fetch` perform its own DNS resolution); this is a TOCTOU window
+    // we accept in exchange for not pinning IPs at the application
+    // layer. Mitigations: short request timeout, redirect:"error", and
+    // a refusal to send any future delivery if validation now fails.
+    const sendTimeValidation = await validateWebhookUrl(webhook.url);
+    if (!sendTimeValidation.ok) {
+      log.warning(
+        `webhook_dispatcher send_time_validation_failed ${JSON.stringify({
+          webhookId: webhook.id,
+          webhookName: webhook.name,
+          urlHost: this.safeHost(webhook.url),
+          error: sendTimeValidation.error,
+        })}`,
+      );
+      this.onDeliveryFailure(webhook);
+      return false;
+    }
+
     // Cap retries: max 3 attempts, max 10 s per-request timeout (I276)
     const maxAttempts = Math.min(webhook.retryCount ?? 3, 3);
     const baseDelay = Math.min(webhook.retryDelayMs ?? 1000, 2000);
@@ -893,6 +917,12 @@ export class WebhookDispatcher {
   /**
    * Update a webhook. Re-validates the URL if it is being changed.
    * Records a ChangeLog entry for SOC2 change-management audit trail.
+   *
+   * Secret handling matches `addWebhook`: the new secret is held only in
+   * the in-memory `webhookSecrets` SecureCredential map and written as
+   * `undefined` to the persisted store. The previous implementation
+   * silently disagreed with the comment in addWebhook — `updateWebhook`
+   * was writing the plaintext secret straight into webhooks.json.
    */
   async updateWebhook(input: UpdateWebhookInput): Promise<WebhookConfig | null> {
     const index = this.store.webhooks.findIndex((w) => w.id === input.id);
@@ -914,13 +944,30 @@ export class WebhookDispatcher {
       ...(input.enabled !== undefined && { enabled: input.enabled }),
       ...(input.events && { events: input.events }),
       ...(input.format && { format: input.format }),
-      ...(input.secret !== undefined && { secret: input.secret }),
       ...(input.headers && { headers: input.headers }),
+      // Force secret to undefined in the persisted record. Real value
+      // (if any) is stored in the in-memory SecureCredential map below.
+      secret: undefined,
       updatedAt: new Date().toISOString(),
     };
 
     this.store.webhooks[index] = updated;
     this.saveStore();
+
+    // Update SecureCredential store. `null` from caller means "clear",
+    // a string means "rotate to this value", `undefined` means "leave as-is".
+    if (input.secret !== undefined) {
+      const existing = this.webhookSecrets.get(updated.id);
+      if (existing) existing.wipe();
+      if (input.secret) {
+        this.webhookSecrets.set(
+          updated.id,
+          new SecureCredential(input.secret, WEBHOOK_SECRET_TTL_MS),
+        );
+      } else {
+        this.webhookSecrets.delete(updated.id);
+      }
+    }
 
     log.success(`✅ Webhook updated: ${updated.name}`);
     await this.recordWebhookChange("update", updated.id, oldHost, this.safeHost(updated.url));
