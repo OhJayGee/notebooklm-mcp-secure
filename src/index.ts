@@ -142,7 +142,7 @@ const TOOLS_EXEMPT_FROM_AUTH = new Set<ToolName>([
   "list_webhooks",
   "deep_research", "gemini_query", "get_research_status",
   "query_document", "list_documents", "query_chunked_document",
-  "get_query_history", "get_notebook_chat_history",
+  "get_query_history",
 ]);
 
 // Tools that require admin-scope auth even when global auth is disabled.
@@ -182,6 +182,11 @@ const TOOLS_REQUIRING_AUTH = new Set<ToolName>([
   "delete_document",
   "upload_document",
   "download_audio",
+  // Read-of-state but writes to disk via output_file → admin scope.
+  // CODEX_FULL_FINDINGS #1 (2026-05-10): the path-policy plumbing
+  // contains the write within the export base, but a persistent local
+  // filesystem mutation should not be reachable through read-scope auth.
+  "get_notebook_chat_history",
   // Compliance — destructive or privileged operations.
   "submit_dsar",
   "export_user_data",

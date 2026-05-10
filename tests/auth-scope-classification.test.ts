@@ -80,6 +80,9 @@ describe("Tool scope classification (CODEX_REVIEW.md Read-Only Token finding)", 
     "delete_document",
     "upload_document",
     "download_audio",
+    // Reads chat history but writes to disk via output_file when set.
+    // See CODEX_FULL_FINDINGS #1 (2026-05-10).
+    "get_notebook_chat_history",
   ];
 
   it.each(MUTATING_TOOLS)("'%s' is in TOOLS_REQUIRING_AUTH", (tool) => {
@@ -118,7 +121,6 @@ describe("Tool scope classification (CODEX_REVIEW.md Read-Only Token finding)", 
       "list_documents",
       "query_chunked_document",
       "get_query_history",
-      "get_notebook_chat_history",
     ];
     for (const tool of expectedReadOnly) {
       expect(exemptFromAuth.has(tool)).toBe(true);
