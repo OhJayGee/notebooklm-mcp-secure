@@ -110,6 +110,14 @@ export class MCPAuthenticator {
   private config: MCPAuthConfig;
   private tokenHash: string | null = null;
   private readOnlyTokenHash: string | null = null;
+  // Stdio transport-auth: the parent process proved knowledge of the token
+  // at spawn time; the stdio pipe IS the trust boundary for the lifetime of
+  // this process. Set in initialize() when NLMCP_STDIO_TRANSPORT_AUTH=true
+  // and a valid token was supplied via env. Once set, authenticate() short-
+  // circuits to valid without inspecting the per-call token. The env var is
+  // scrubbed unconditionally in this mode — no in-env credential remains.
+  private connectionTrusted: boolean = false;
+  private connectionTrustedScope: MCPAuthScope = "admin";
   private failedAttempts: Map<string, FailedAttemptTracker> = new Map();
   private initialized: boolean = false;
   private hashSalt: string = '';
@@ -140,6 +148,45 @@ export class MCPAuthenticator {
   async initialize(): Promise<void> {
     if (this.initialized) return;
 
+    // ── Stdio transport-auth: validate the requested mode before any
+    // other init work, so misconfiguration produces a clear error
+    // before token state mutates.
+    //
+    // Trust model: for stdio transport, the pipe between parent and
+    // child IS the trust boundary. If the parent process proves
+    // knowledge of the token at spawn time, every subsequent message
+    // on that pipe is by definition from the same trusted parent.
+    // Per-call re-validation adds no security but breaks naive stdio
+    // clients (Claude Code etc.) that cannot inject `_meta.authToken`.
+    //
+    // Modes:
+    //   default                              → per-call auth (HTTP/SSE/custom)
+    //   NLMCP_STDIO_TRANSPORT_AUTH=true      → trust the pipe, admin scope
+    //   …_SCOPE=read alongside that          → trust the pipe, read scope
+    const stdioAuth = parseBoolean(process.env.NLMCP_STDIO_TRANSPORT_AUTH, false);
+    if (stdioAuth) {
+      if (!this.config.enabled) {
+        throw new Error(
+          "NLMCP_STDIO_TRANSPORT_AUTH=true requires MCP auth to be enabled. " +
+          "Remove NLMCP_AUTH_DISABLED=true, or unset NLMCP_STDIO_TRANSPORT_AUTH.",
+        );
+      }
+      if (!this.config.token) {
+        throw new Error(
+          "NLMCP_STDIO_TRANSPORT_AUTH=true requires NLMCP_AUTH_TOKEN to be set " +
+          "in env at startup. The parent process must prove knowledge of the " +
+          "token to establish trust on the stdio pipe.",
+        );
+      }
+      const scopeRaw = process.env.NLMCP_STDIO_TRANSPORT_AUTH_SCOPE;
+      if (scopeRaw !== undefined && scopeRaw !== "admin" && scopeRaw !== "read") {
+        throw new Error(
+          `NLMCP_STDIO_TRANSPORT_AUTH_SCOPE must be 'admin' or 'read' (default 'admin'), got '${scopeRaw}'`,
+        );
+      }
+      this.connectionTrustedScope = scopeRaw === "read" ? "read" : "admin";
+    }
+
     if (!this.config.enabled && !this.config.token && !this.config.readOnlyToken) {
       log.info("🔓 MCP authentication is disabled");
       this.initialized = true;
@@ -148,25 +195,31 @@ export class MCPAuthenticator {
 
     log.info("🔐 Initializing MCP authentication...");
 
-    // Try to load token from environment — blank env var after reading (I236).
-    // The blank is opt-out: stdio MCP clients (Claude Code, Codex CLI, etc.)
-    // cannot inject `_meta.authToken` per call, so the request handler at
-    // src/index.ts:446 needs `process.env.NLMCP_AUTH_TOKEN` to survive
-    // initialize() for those calls to authenticate. Set NLMCP_AUTH_KEEP_ENV
-    // =true in those deployments. Default false preserves the credential-
-    // isolation behaviour that suits HTTP/SSE deployments.
+    // Per-call env-var fallback (NLMCP_AUTH_KEEP_ENV) — kept as an escape
+    // hatch for unusual stdio deployments that have not migrated to the
+    // transport-auth model. Default scrubs the env (I236 — credential
+    // isolation). Transport-auth mode below overrides keepEnv and ALWAYS
+    // scrubs, because trust no longer depends on the env var surviving.
     const keepEnv = parseBoolean(process.env.NLMCP_AUTH_KEEP_ENV, false);
     if (this.config.token) {
       this.tokenHash = this.hashToken(this.config.token);
       this.config.token = undefined;
-      if (!keepEnv) delete process.env.NLMCP_AUTH_TOKEN;
-      log.success(
-        `  ✅ Using token from environment variable${keepEnv ? " (kept in env for per-call fallback)" : ""}`,
-      );
+      if (stdioAuth) {
+        this.connectionTrusted = true;
+        delete process.env.NLMCP_AUTH_TOKEN;
+        log.success(
+          `  ✅ Stdio transport-auth ENABLED — connection trusted (${this.connectionTrustedScope} scope), env scrubbed`,
+        );
+      } else if (!keepEnv) {
+        delete process.env.NLMCP_AUTH_TOKEN;
+        log.success("  ✅ Using token from environment variable");
+      } else {
+        log.success("  ✅ Using token from environment variable (kept in env for per-call fallback)");
+      }
       if (this.config.readOnlyToken) {
         this.readOnlyTokenHash = this.hashToken(this.config.readOnlyToken);
         this.config.readOnlyToken = undefined;
-        if (!keepEnv) delete process.env.NLMCP_AUTH_READONLY_TOKEN;
+        if (stdioAuth || !keepEnv) delete process.env.NLMCP_AUTH_READONLY_TOKEN;
         log.success("  ✅ Using read-only token from environment variable");
       }
       this.initialized = true;
@@ -479,6 +532,33 @@ export class MCPAuthenticator {
         client_id: clientId,
       });
       return { valid: false, error: "locked_out" };
+    }
+
+    // Stdio transport-auth short-circuit: the parent process proved
+    // knowledge of the token at startup, the stdio pipe is the trust
+    // boundary thereafter. Honour the optional scope downgrade so
+    // cautious deployments can pin trust to read-only.
+    if (this.connectionTrusted) {
+      if (this.connectionTrustedScope === "read" && requiredScope === "admin") {
+        log.warning(
+          `🔒 Stdio transport-auth: trust pinned to read scope, admin tool denied (client: ${clientId})`,
+        );
+        getMetricsRegistry().increment("mcp_auth_failures_total", { reason: "insufficient_scope" });
+        await audit.auth("auth_failed", false, {
+          client_id: clientId,
+          reason: "insufficient_scope",
+          required_scope: requiredScope,
+          token_scope: "read",
+          mode: "stdio_transport_auth",
+        });
+        return { valid: false, scope: "read", error: "insufficient_scope" };
+      }
+      await audit.auth("auth_success", true, {
+        client_id: clientId,
+        scope: this.connectionTrustedScope,
+        mode: "stdio_transport_auth",
+      });
+      return { valid: true, scope: this.connectionTrustedScope };
     }
 
     // Validate token
