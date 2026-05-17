@@ -5,6 +5,98 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026.3.7] - 2026-05-17
+
+### Fix — stdio MCP clients can finally authenticate
+
+**The problem this fixes.** The README documents an `env`-block deployment
+pattern for stdio MCP clients (Claude Code, Codex CLI, Claude Desktop):
+
+```json
+"env": { "NLMCP_AUTH_TOKEN": "..." }
+```
+
+The server's request handler at `src/index.ts:446` falls back to
+`process.env.NLMCP_AUTH_TOKEN` when the per-call `_meta.authToken` is
+absent — which it always is from naive stdio clients, since the MCP
+protocol has no standard mechanism for a client to attach a bearer
+token to each tool call over stdio.
+
+But `mcp-auth.ts:155` (I236 — "credential isolation") deleted
+`process.env.NLMCP_AUTH_TOKEN` during `initialize()`, which the server
+calls at startup. By the time any tool call arrived, the env var was
+gone, the fallback returned `undefined`, and every authenticated call
+failed with `"Authentication required"`. The two halves of the design
+contradicted each other.
+
+In practice this meant: **the entire admin-tool surface (`setup_auth`,
+`re_auth`, all mutating ops) was unreachable from Claude Code with auth
+enabled, including the bootstrap `setup_auth` call required to do the
+initial Google login.** `NLMCP_AUTH_DISABLED=true` did not rescue it,
+because `index.ts:454` and `mcp-auth.ts:457` force admin-scope auth
+even when auth is globally disabled.
+
+This is a latent bug in this fork's full lineage (visible in
+`@pan-sec/notebooklm-mcp@2026.3.3` as well) — never surfaced because
+users either ran without auth (`NLMCP_AUTH_DISABLED=true` + read-only
+use) or did the initial `setup_auth` from a custom MCP client that
+forwarded `_meta.authToken`.
+
+**The fix.** New env flag `NLMCP_AUTH_KEEP_ENV` (default `false`,
+preserves the I236 scrubbing behaviour). When `true`, the three
+`delete process.env.NLMCP_AUTH_TOKEN` / `NLMCP_AUTH_READONLY_TOKEN`
+calls in `initialize()` are skipped, so the env-var fallback at request
+time resolves to the configured token and per-call auth succeeds.
+
+**Security tradeoff.** With the flag enabled, the token stays in the
+server subprocess's env for its lifetime. Any subsequent `spawn()`
+from inside that process inherits it; any diagnostic dump of `process
+.env` includes it. The flag is opt-in precisely because some deploy-
+ments (HTTP/SSE servers behind a reverse proxy) genuinely don't need
+the env-var fallback and benefit from the scrubbing. Stdio MCP
+deployments where the server subprocess is fully under the user's
+control (Claude Code spawning the server as a child) are the intended
+audience for the opt-in.
+
+**Per-site map (3 sites in `src/auth/mcp-auth.ts`):**
+- `initialize()` token branch — `delete process.env.NLMCP_AUTH_TOKEN`
+  now `if (!keepEnv) delete …`
+- Same branch's readonly-token sub-clause — same conditional
+- Standalone readonly-token branch — same conditional
+
+**Tests added (`tests/mcp-auth.test.ts`):**
+- Default behaviour preserved: `NLMCP_AUTH_TOKEN` scrubbed from env
+  after `initialize()`
+- `NLMCP_AUTH_KEEP_ENV=true` keeps it, and a subsequent
+  `validateToken` call succeeds
+- `NLMCP_AUTH_KEEP_ENV=true` also preserves
+  `NLMCP_AUTH_READONLY_TOKEN`
+- `NLMCP_AUTH_KEEP_ENV=false` (explicit) behaves identically to the
+  default (env scrubbed)
+
+**Deployment migration.** Existing `~/.claude.json` / `.codex/...`
+entries that already include `NLMCP_AUTH_TOKEN` in their `env` block
+need one additional key:
+
+```json
+"env": {
+  "NLMCP_AUTH_TOKEN": "...",
+  "NLMCP_AUTH_KEEP_ENV": "true"
+}
+```
+
+Without this, the server starts and the MCP handshake (`initialize`,
+`list_tools`) succeeds, but every actual tool call returns the
+`"Authentication required"` error.
+
+### Build
+
+- `dist/` rebuilt against current `src/`.
+- `npx tsc --noEmit` — clean.
+- Test count: **841 → 845** (+4 new tests).
+
+---
+
 ## [2026.3.6] - 2026-05-17
 
 ### Sanitizer-coverage follow-up to v2026.3.4 finding #11
