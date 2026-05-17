@@ -5,6 +5,82 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026.3.9] - 2026-05-17
+
+### Docs — bring all user-facing surfaces in line with v2026.3.8
+
+v2026.3.7 (`NLMCP_AUTH_KEEP_ENV`) and v2026.3.8 (`NLMCP_STDIO_TRANSPORT
+_AUTH`) shipped the code fix but only updated `CHANGELOG.md`. Anyone
+following `README.md`, `SECURITY.md`, or the operator banner the
+server prints on first-run token generation would still land in the
+chicken-and-egg those releases closed. This release closes that
+documentation gap.
+
+**Per-site map:**
+
+- `README.md`:
+  - "With Authentication + Gemini (Recommended)" Claude Code example
+    — switch from `NLMCP_AUTH_ENABLED=true` to
+    `NLMCP_STDIO_TRANSPORT_AUTH=true`, with a one-paragraph
+    explanation of why both env vars are needed
+  - New "MCP auth modes (stdio)" reference section (table covering
+    the four modes: default per-call / stdio transport-auth admin /
+    stdio transport-auth read / legacy keep-env escape hatch) +
+    trust-model rationale
+  - Cursor JSON config example — same swap, plus link to the modes
+    section
+  - "Configuration" section env-var reference — expand from 2 lines
+    to 6, covering all auth-related flags with their semantics
+- `SECURITY.md`:
+  - "Secure-by-Default Auth" feature-matrix row — mention the stdio
+    transport-auth model
+  - New "MCP Authentication → Trust model" subsection — explains the
+    stdio-pipe-is-the-trust-boundary reasoning + the HTTP/SSE
+    counterpoint (anyone-on-network → per-call mandatory)
+  - New "MCP Authentication → Modes" subsection — same four-mode
+    table as README, mirrored for the security-audience reader
+  - Update the auto-generated-token printed-banner example to show
+    the new format (NLMCP_STDIO_TRANSPORT_AUTH in the recommended
+    config block)
+  - Claude Code Configuration example — swap to transport-auth +
+    note about the optional read-only-scope downgrade
+  - Rate Limiting note — clarify that lockouts are bypassed in
+    transport-auth mode (no per-call token validation = nothing to
+    lock out on)
+  - Quick Start example — swap to transport-auth, add `--` separator
+    that was missing
+- `src/auth/mcp-auth.ts` (`printTokenInstructions()`):
+  - The TTY-mode operator banner the server prints when it auto-
+    generates a token now shows the `NLMCP_STDIO_TRANSPORT_AUTH=true`
+    recommendation alongside `NLMCP_AUTH_TOKEN`, and the example
+    `claude mcp add` invocation includes both flags
+  - Pointer line `Why both env vars? See README → MCP auth modes
+    (stdio).` so operators know where to read the trust-model writeup
+- `AGENTS.md`:
+  - New "MCP auth modes — how the token reaches the server"
+    subsection in the trust-boundaries area — distinguishes "which
+    tools require auth" (the existing scope-classification rule) from
+    "how the MCP client authenticates per call" (the new
+    transport-auth mode)
+  - Pointer to the short-circuit location in
+    `MCPAuthenticator.validateTokenScope()` with a warning to
+    preserve its ordering relative to the lockout check
+  - Explicit "always prefer transport-auth for new stdio deployments"
+    so future agent sessions don't recommend the legacy keep-env
+    escape hatch by default
+
+**Not touched.** `docs/SECURITY_IMPLEMENTATION_PLAN.md` (historical
+planning doc) and `docs/security-reviews/*.md` (verbatim external
+reviewer reports) are left as-is.
+
+### Build
+
+- `dist/` rebuilt (banner change in src/auth/mcp-auth.ts).
+- `npx tsc --noEmit` — clean.
+- Test count: **853** (unchanged — docs-only release).
+
+---
+
 ## [2026.3.8] - 2026-05-17
 
 ### Stdio transport-auth — a principled fix for the stdio-auth gap
