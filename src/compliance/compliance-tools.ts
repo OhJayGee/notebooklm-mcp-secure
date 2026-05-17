@@ -21,6 +21,7 @@ import { getComplianceLogger } from "./compliance-logger.js";
 import { getIncidentManager } from "./incident-manager.js";
 import type { IncidentType, IncidentSeverity, ConsentPurpose } from "./types.js";
 import { audit } from "../utils/audit-logger.js";
+import { getSanitizedErrorMessage } from "../tools/handlers/error-utils.js";
 
 /**
  * Tool definitions for compliance features
@@ -441,7 +442,7 @@ export async function handleComplianceToolCall(
     await audit.tool(toolName, args, true, Date.now() - startTime);
     return result;
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage = getSanitizedErrorMessage(error);
     await audit.tool(toolName, args, false, Date.now() - startTime, errorMessage);
     return [
       {
@@ -825,4 +826,3 @@ async function handleGetPolicy(
 
   return [{ type: "text", text: JSON.stringify(policy, null, 2) }];
 }
-

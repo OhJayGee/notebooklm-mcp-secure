@@ -17,6 +17,7 @@ import type { SystemEvent, EventType } from "../events/event-types.js";
 import { scanAndRedactSecrets } from "../utils/secrets-scanner.js";
 import { SecureCredential } from "../utils/secure-memory.js";
 import { getMetricsRegistry } from "../observability/metrics.js";
+import { getSanitizedErrorMessage } from "../tools/handlers/error-utils.js";
 import type {
   WebhookConfig,
   WebhookConfigPublic,
@@ -631,10 +632,12 @@ export class WebhookDispatcher {
           `  ⚠️ Webhook failed (attempt ${attempt}/${maxAttempts}): ${webhook.name} - ${response.status}`
         );
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
+        const errorMessage = getSanitizedErrorMessage(error);
 
         // Walk the cause chain: Node's fetch wraps DNS/connect errors as
-        // TypeError("fetch failed", { cause: Error("getaddrinfo ENOTFOUND ...") })
+        // TypeError("fetch failed", { cause: Error("getaddrinfo ENOTFOUND ...") }).
+        // Kept raw (not sanitized) — only used internally below for DNS-pattern
+        // matching to classify retry strategy; never returned to client.
         const causeMessages: string[] = [];
         let cur: unknown = error;
         while (cur instanceof Error) {

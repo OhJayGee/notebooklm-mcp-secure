@@ -136,7 +136,7 @@ export async function handleDownloadAudio(
           return {
             success: false,
             data: null,
-            error: err.message,
+            error: getSanitizedErrorMessage(err),
           };
         }
         throw err;

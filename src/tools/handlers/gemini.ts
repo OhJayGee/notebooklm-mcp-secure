@@ -373,7 +373,7 @@ export async function handleUploadDocument(
       safeFilePath = assertSafeLocalReadPath(args.file_path);
     } catch (err) {
       if (err instanceof PathPolicyError) {
-        return { success: false, data: null, error: err.message };
+        return { success: false, data: null, error: getSanitizedErrorMessage(err) };
       }
       throw err;
     }
@@ -944,7 +944,7 @@ export async function handleGetNotebookChatHistory(
             return {
               success: false,
               data: null,
-              error: err.message,
+              error: getSanitizedErrorMessage(err),
             };
           }
           throw err;

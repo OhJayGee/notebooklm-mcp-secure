@@ -10,6 +10,7 @@ import { log } from "../../utils/logger.js";
 import { getQuotaManager } from "../../quota/index.js";
 import { CleanupManager } from "../../utils/cleanup-manager.js";
 import { resolveExportFilePath, PathPolicyError } from "../../utils/path-policy.js";
+import { getSanitizedErrorMessage } from "./error-utils.js";
 
 /**
  * Sanitize a CSV field to prevent formula injection (CWE-1236).
@@ -51,7 +52,7 @@ export async function handleExportLibrary(
       outputPath = resolveExportFilePath(args.output_path, defaultName);
     } catch (err) {
       if (err instanceof PathPolicyError) {
-        return { success: false, data: null, error: err.message };
+        return { success: false, data: null, error: getSanitizedErrorMessage(err) };
       }
       throw err;
     }
@@ -104,7 +105,7 @@ export async function handleExportLibrary(
       },
     };
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage = getSanitizedErrorMessage(error);
     log.error(`❌ [TOOL] export_library failed: ${errorMessage}`);
     return {
       success: false,
@@ -145,7 +146,7 @@ export async function handleGetProjectInfo(
       },
     };
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage = getSanitizedErrorMessage(error);
     log.error(`❌ [TOOL] get_project_info failed: ${errorMessage}`);
     return {
       success: false,
@@ -248,7 +249,7 @@ export async function handleGetQuota(
       },
     };
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage = getSanitizedErrorMessage(error);
     log.error(`❌ [TOOL] get_quota failed: ${errorMessage}`);
     return {
       success: false,
@@ -290,7 +291,7 @@ export async function handleSetQuotaTier(
       },
     };
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage = getSanitizedErrorMessage(error);
     log.error(`❌ [TOOL] set_quota_tier failed: ${errorMessage}`);
     return {
       success: false,
@@ -381,7 +382,7 @@ export async function handleCleanupData(
       };
     }
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage = getSanitizedErrorMessage(error);
     log.error(`❌ [TOOL] cleanup_data failed: ${errorMessage}`);
     return {
       success: false,

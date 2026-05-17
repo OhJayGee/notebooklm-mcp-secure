@@ -16,6 +16,7 @@ import { log } from "../utils/logger.js";
 import { getComplianceLogger } from "./compliance-logger.js";
 import { getAuditLogger } from "../utils/audit-logger.js";
 import { DataClassification, type RetentionPolicy } from "./types.js";
+import { getSanitizedErrorMessage } from "../tools/handlers/error-utils.js";
 
 /**
  * Generate a UUID v4
@@ -381,7 +382,7 @@ export class RetentionEngine {
         );
       } catch (error) {
         result.success = false;
-        result.error = error instanceof Error ? error.message : String(error);
+        result.error = getSanitizedErrorMessage(error);
       }
 
       results.push(result);

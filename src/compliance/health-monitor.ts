@@ -17,6 +17,7 @@ import { getConsentManager } from "./consent-manager.js";
 import { getRetentionEngine } from "./retention-engine.js";
 import { getIncidentManager } from "./incident-manager.js";
 import { getAlertManager } from "./alert-manager.js";
+import { getSanitizedErrorMessage } from "../tools/handlers/error-utils.js";
 import type {
   HealthMetrics,
   ComponentHealth,
@@ -141,7 +142,7 @@ export class HealthMonitor {
             name: check.name,
             status: "down" as const,
             last_check: new Date().toISOString(),
-            error: error instanceof Error ? error.message : String(error),
+            error: getSanitizedErrorMessage(error),
           };
         }
       })
@@ -249,7 +250,7 @@ export class HealthMonitor {
         name: "data_directory",
         status: "down",
         last_check: new Date().toISOString(),
-        error: error instanceof Error ? error.message : String(error),
+        error: getSanitizedErrorMessage(error),
       };
     }
   }
@@ -285,7 +286,7 @@ export class HealthMonitor {
         name: "config_directory",
         status: "down",
         last_check: new Date().toISOString(),
-        error: error instanceof Error ? error.message : String(error),
+        error: getSanitizedErrorMessage(error),
       };
     }
   }
@@ -341,7 +342,7 @@ export class HealthMonitor {
         name: "audit_logging",
         status: "down",
         last_check: new Date().toISOString(),
-        error: error instanceof Error ? error.message : String(error),
+        error: getSanitizedErrorMessage(error),
       };
     }
   }
@@ -387,7 +388,7 @@ export class HealthMonitor {
         name: "compliance_logging",
         status: "down",
         last_check: new Date().toISOString(),
-        error: error instanceof Error ? error.message : String(error),
+        error: getSanitizedErrorMessage(error),
       };
     }
   }
@@ -432,7 +433,7 @@ export class HealthMonitor {
         name: "encryption",
         status: "down",
         last_check: new Date().toISOString(),
-        error: error instanceof Error ? error.message : String(error),
+        error: getSanitizedErrorMessage(error),
       };
     }
   }
