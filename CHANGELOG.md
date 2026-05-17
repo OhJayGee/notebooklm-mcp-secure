@@ -5,6 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026.3.6] - 2026-05-17
+
+### Sanitizer-coverage follow-up to v2026.3.4 finding #11
+
+v2026.3.4 finding #11 introduced `getSanitizedErrorMessage` (strips
+absolute paths and stack-frame fragments before client-visible error
+text leaves the process). v2026.3.5 wired it through the per-handler
+early-return path in three handler files plus the compliance dispatcher.
+This release closes the remaining client-visible sites so the invariant
+"every code path that constructs a client-visible `error:` field from a
+caught Error routes the message through `getSanitizedErrorMessage`"
+holds repo-wide.
+
+**Per-site map (8 sites across 3 files):**
+
+- `src/compliance/health-monitor.ts` (6 sites) — `error` field in the
+  `ComponentHealth` shape returned to the client by every health probe
+  (data_directory, config_directory, audit_logging, compliance_logging,
+  encryption, and the top-level per-check catch wrapper). Surfaced via
+  the `run_health_check` compliance tool and the `get_health` MCP tool.
+- `src/compliance/retention-engine.ts:384` — `result.error` returned by
+  retention-policy execution and surfaced via the compliance retention
+  tools.
+- `src/webhooks/webhook-dispatcher.ts:634` — `delivery.error` recorded
+  on each webhook delivery attempt and surfaced via webhook status
+  tools. The cause-chain walk used for DNS-pattern retry classification
+  remains unsanitised (internal-only, never returned to the client) and
+  is annotated as such.
+
+**Tests added (`tests/v2026.3.6-sanitizer-fixes.test.ts`):**
+
+- Source-grep coverage that every affected file imports the helper and
+  contains no leftover raw `error instanceof Error ? error.message :
+  String(error)` pattern feeding a client-visible field.
+- One end-to-end runtime test that invokes `handleComplianceToolCall`
+  against a stubbed `getDashboardCLI` that throws an Error containing
+  both an absolute path and a stack-frame fragment, and asserts both
+  the returned TextContent text AND the audit-log argument have been
+  stripped to `[path]` with no `at func (file:line:col)` remnant.
+
+The misfiled `V2026.3.4 follow-up` describe that landed in
+`tests/external-review-round3-fixes.test.ts` in the in-flight v2026.3.5
+work has been relocated to the new file above.
+
+### Build
+
+- `dist/` rebuilt against current `src/`.
+- `npx tsc --noEmit` — clean.
+- Test count: **837 → 845** (+8 new tests).
+
+---
+
 ## [2026.3.5] - 2026-05-10
 
 ### Whole-Repo External Review (Round 4) — Three independent reviewers
