@@ -84,6 +84,46 @@ in `TOOLS_EXEMPT_FROM_AUTH` "for convenience", don't.** That mistake
 is the entire root cause of the v2026.3.3 "read-only token can
 mutate" finding.
 
+## MCP auth modes — how the token reaches the server
+
+The scope classification above is about WHICH tools require auth.
+This section is about HOW the MCP client authenticates per call.
+Three modes, picked by env vars at server startup:
+
+- **default (per-call)** — `NLMCP_AUTH_TOKEN` only. Server reads the
+  token at init, hashes it, scrubs the env var. Every tool call
+  thereafter must present the token in `request.params._meta
+  .authToken`. **Will NOT work with Claude Code / Codex CLI / Claude
+  Desktop over stdio** — those clients have no per-call token
+  injection mechanism. Use for HTTP/SSE deployments or custom MCP
+  clients only.
+- **stdio transport-auth (recommended for stdio)** — `NLMCP_AUTH_TOKEN`
+  + `NLMCP_STDIO_TRANSPORT_AUTH=true`. At init, the server validates
+  that the parent provided a token (proof of knowledge), records the
+  connection as trusted, scrubs the env unconditionally, and short-
+  circuits per-call auth in `validateTokenScope()` thereafter. Trust
+  model: the stdio pipe IS the trust boundary — only the spawning
+  parent can write to that FD. Default scope: admin.
+- **stdio transport-auth (read-only)** — Above +
+  `NLMCP_STDIO_TRANSPORT_AUTH_SCOPE=read`. Same trust establishment,
+  but pinned to read scope; admin-scope tools rejected with
+  `insufficient_scope`. Use for cautious deployments where you want
+  read access but not the ability to mutate (e.g., a notebook-search
+  helper that never modifies the library).
+
+The transport-auth short-circuit lives in `MCPAuthenticator
+.validateTokenScope()` (src/auth/mcp-auth.ts) right after the lockout
+check and before the no-token check. When you change anything in that
+method, preserve the short-circuit ordering — moving it later would
+either break the lockout invariant or re-introduce the chicken-and-
+egg that v2026.3.8 closed.
+
+Legacy escape hatch `NLMCP_AUTH_KEEP_ENV=true` (v2026.3.7) keeps the
+token in `process.env` so the request-handler fallback at `src/index
+.ts:446` resolves to it at call time. Same operational fix as
+transport-auth but with the env-leak surface. **Always prefer
+transport-auth for new stdio deployments.**
+
 ## How to add a new tool — checklist
 
 1. Schema: define the tool in `src/tools/definitions/<area>.ts`.

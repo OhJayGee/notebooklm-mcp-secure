@@ -73,7 +73,7 @@ those primitives are not sufficient for certification on their own.
 | **Memory Scrubbing** | ✅ | Zero sensitive data after use, FinalizationRegistry cleanup |
 | **MEDUSA Integration** | ✅ | Automated security scanning in CI |
 | **Cross-Platform Permissions** | ✅ | Secure file permissions on all OSes |
-| **Secure-by-Default Auth** | ✅ | Auth enabled without configuration; explicit opt-out via `NLMCP_AUTH_DISABLED=true` |
+| **Secure-by-Default Auth** | ✅ | Auth enabled without configuration; stdio MCP clients use `NLMCP_STDIO_TRANSPORT_AUTH=true` for the trusted-pipe model (see MCP Authentication section); explicit opt-out via `NLMCP_AUTH_DISABLED=true` |
 | **Exponential Backoff Lockout** | ✅ | Failed auth lockouts escalate 5min → 15min → 45min → 4hr; `lockoutCount` persists |
 | **Credential Isolation** | ✅ | `LOGIN_PASSWORD` and `GEMINI_API_KEY` wrapped in `SecureCredential` with 30-min TTL; env vars scrubbed from `process.env` |
 | **Webhook SSRF Protection** | ✅ | Delivery targets validated against SSRF blocklist; HMAC signing on all deliveries |
@@ -331,35 +331,67 @@ NLMCP_SESSION_INACTIVITY=1800      # 30 minutes in seconds
 
 ## MCP Authentication
 
-Require authentication for all MCP requests.
+Require authentication for all MCP requests. The trust model depends
+on transport.
+
+### Trust model
+
+**Stdio transport.** The pipe between parent and child IS the trust
+boundary. Only the spawning parent can write to that file descriptor.
+Once the parent has proved knowledge of the token at startup, every
+subsequent message on that pipe is by definition from the same trusted
+parent — per-call re-validation adds no security against any attacker
+the design defends against (prompt-injection coercion of an already-
+trusted parent is in scope; an attacker who has compromised the parent
+process is out of scope). `NLMCP_STDIO_TRANSPORT_AUTH=true` enables
+this model.
+
+**HTTP/SSE transport.** Anyone on the network could connect, so per-
+call auth stays mandatory. Token must be presented in
+`request.params._meta.authToken` on every tool call. Default mode.
+
+### Modes
+
+| Mode | Env vars | When to use |
+|---|---|---|
+| **default (per-call)** | `NLMCP_AUTH_TOKEN` | HTTP/SSE, or custom stdio clients that inject `_meta.authToken` per call. Will NOT work with Claude Code / Codex CLI / Claude Desktop. |
+| **stdio transport-auth (recommended for stdio)** | `NLMCP_AUTH_TOKEN` + `NLMCP_STDIO_TRANSPORT_AUTH=true` | Stdio MCP clients. Parent proves token at startup, server scrubs env, per-call auth short-circuits. Admin scope. |
+| **stdio transport-auth (read-only)** | Above + `NLMCP_STDIO_TRANSPORT_AUTH_SCOPE=read` | Trust pinned to read scope; admin-scope tools (`setup_auth`, mutations) rejected with `insufficient_scope`. |
+| **legacy escape hatch** | `NLMCP_AUTH_TOKEN` + `NLMCP_AUTH_KEEP_ENV=true` | Same operational effect as transport-auth but leaves token in `process.env` for the process lifetime. Retained for backwards compatibility; prefer transport-auth. |
 
 ### Setup
 
 On first run with auth enabled, a token is auto-generated:
 ```
-╔════════════════════════════════════════════════════════════╗
-║  NEW MCP AUTHENTICATION TOKEN GENERATED                     ║
-╠════════════════════════════════════════════════════════════╣
-║  Token: <your-token>                                        ║
-╠════════════════════════════════════════════════════════════╣
-║  Add to your MCP client config:                            ║
-║    NLMCP_AUTH_TOKEN=<token>                                ║
-╚════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════════╗
+║  MCP AUTHENTICATION TOKEN                                           ║
+╠══════════════════════════════════════════════════════════════════════╣
+║  Token: <your-token>                                                 ║
+╠══════════════════════════════════════════════════════════════════════╣
+║  Add to your stdio MCP client config:                               ║
+║    NLMCP_AUTH_TOKEN=<token>                                          ║
+║    NLMCP_STDIO_TRANSPORT_AUTH=true                                   ║
+╚══════════════════════════════════════════════════════════════════════╝
 ```
 
 ### Claude Code Configuration
 
 ```bash
 claude mcp add notebooklm \
-  --env NLMCP_AUTH_ENABLED=true \
   --env NLMCP_AUTH_TOKEN=<your-token> \
-  npx notebooklm-mcp-secure
+  --env NLMCP_STDIO_TRANSPORT_AUTH=true \
+  -- npx notebooklm-mcp-secure
 ```
+
+For a read-only deployment, add `--env NLMCP_STDIO_TRANSPORT_AUTH_SCOPE=read`.
 
 ### Rate Limiting for Failed Auth
 
 - 5 failed attempts = 5 minute lockout
 - Prevents brute force attacks
+- Bypassed entirely in transport-auth mode (the pipe is the trust
+  boundary; lockouts cannot apply to a connection that doesn't need
+  per-call token validation)
 
 ---
 
@@ -471,12 +503,12 @@ npm install notebooklm-mcp-secure
 # Or with Claude Code
 claude mcp add notebooklm npx notebooklm-mcp-secure@latest
 
-# With all security features
+# With all security features (recommended for stdio MCP clients)
 claude mcp add notebooklm \
-  --env NLMCP_AUTH_ENABLED=true \
   --env NLMCP_AUTH_TOKEN=$(openssl rand -base64 32) \
+  --env NLMCP_STDIO_TRANSPORT_AUTH=true \
   --env NLMCP_USE_POST_QUANTUM=true \
-  npx notebooklm-mcp-secure@latest
+  -- npx notebooklm-mcp-secure@latest
 ```
 
 ---

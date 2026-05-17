@@ -797,11 +797,39 @@ claude mcp add notebooklm -- npx @ohjaygee/notebooklm-mcp-secure@latest
 ### With Authentication + Gemini (Recommended)
 ```bash
 claude mcp add notebooklm \
-  --env NLMCP_AUTH_ENABLED=true \
   --env NLMCP_AUTH_TOKEN=$(openssl rand -base64 32) \
+  --env NLMCP_STDIO_TRANSPORT_AUTH=true \
   --env GEMINI_API_KEY=your-gemini-api-key \
   -- npx @ohjaygee/notebooklm-mcp-secure@latest
 ```
+
+> **Why `NLMCP_STDIO_TRANSPORT_AUTH=true`?** Without it, every tool call
+> from Claude Code fails with `"Authentication required"` — Claude Code
+> (and other stdio MCP clients: Codex CLI, Claude Desktop, Cursor) cannot
+> attach a per-call bearer token to MCP requests over stdio. The flag
+> tells the server to trust the stdio pipe after the parent process has
+> proved knowledge of the token at startup. See
+> [MCP auth modes](#mcp-auth-modes-stdio) for the trust model and the
+> optional read-only-scope downgrade.
+
+### MCP auth modes (stdio)
+
+| Mode | Env vars | When to use |
+|---|---|---|
+| **default (per-call)** | `NLMCP_AUTH_TOKEN` only | HTTP/SSE deployments, or custom MCP clients that inject `_meta.authToken` on every tool call. **Will NOT work with Claude Code / Codex CLI / Claude Desktop over stdio.** |
+| **stdio transport-auth (recommended)** | `NLMCP_AUTH_TOKEN` + `NLMCP_STDIO_TRANSPORT_AUTH=true` | Default for stdio MCP clients. The parent process proves knowledge of the token at startup, the server records the connection as trusted, scrubs the token from `process.env`, and short-circuits per-call auth thereafter. Admin scope. |
+| **stdio transport-auth (read-only)** | Above + `NLMCP_STDIO_TRANSPORT_AUTH_SCOPE=read` | Same as above but trust is pinned to read scope; admin-scope tool calls (`setup_auth`, mutations, etc.) are rejected with `insufficient_scope`. |
+| **legacy escape hatch** | `NLMCP_AUTH_TOKEN` + `NLMCP_AUTH_KEEP_ENV=true` | Same operational effect as transport-auth but token stays in `process.env` for the process lifetime. Retained for backwards compatibility; prefer transport-auth. |
+
+**Trust model rationale.** For stdio MCP transport, the pipe between
+parent and child IS the trust boundary — only the spawning parent can
+write to that file descriptor. Re-validating a per-call token doesn't
+defend against any attacker the design contemplates. Transport-auth
+records "the parent proved knowledge of the token at startup" and
+trusts the pipe for the lifetime of the process. The trust flag is
+in-memory only; a restart re-validates that the parent still has the
+token. (HTTP/SSE deployments don't share this property — anyone on the
+network could connect — so per-call auth stays mandatory there.)
 
 ### Codex
 ```bash
@@ -819,14 +847,15 @@ Add to `~/.cursor/mcp.json`:
       "command": "npx",
       "args": ["-y", "@ohjaygee/notebooklm-mcp-secure@latest"],
       "env": {
-        "NLMCP_AUTH_ENABLED": "true",
         "NLMCP_AUTH_TOKEN": "your-secure-token",
+        "NLMCP_STDIO_TRANSPORT_AUTH": "true",
         "GEMINI_API_KEY": "your-gemini-api-key"
       }
     }
   }
 }
 ```
+See [MCP auth modes](#mcp-auth-modes-stdio) for the trust model.
 </details>
 
 <details>
@@ -1055,9 +1084,17 @@ Go to [notebooklm.google.com](https://notebooklm.google.com) → Create notebook
 All security features are **enabled by default**. Override via environment variables:
 
 ```bash
-# Authentication
-NLMCP_AUTH_ENABLED=true
-NLMCP_AUTH_TOKEN=your-secret-token
+# Authentication (see "MCP auth modes (stdio)" section above for the trust model)
+NLMCP_AUTH_TOKEN=your-secret-token             # Bearer credential, hashed at startup
+NLMCP_STDIO_TRANSPORT_AUTH=true                # Recommended for stdio MCP clients
+                                                # (Claude Code, Codex CLI, Claude Desktop)
+NLMCP_STDIO_TRANSPORT_AUTH_SCOPE=admin         # Optional: 'read' downgrades trust
+                                                # to read scope; admin tools rejected
+NLMCP_AUTH_KEEP_ENV=false                      # Legacy escape hatch — prefer
+                                                # NLMCP_STDIO_TRANSPORT_AUTH instead
+NLMCP_AUTH_DISABLED=false                      # Opt out entirely (admin tools still
+                                                # require auth — admin gate is forced)
+NLMCP_AUTH_ENABLED=true                        # Legacy alias for !NLMCP_AUTH_DISABLED
 
 # Gemini API (v1.8.0+)
 GEMINI_API_KEY=your-api-key
