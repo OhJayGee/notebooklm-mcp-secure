@@ -148,16 +148,25 @@ export class MCPAuthenticator {
 
     log.info("🔐 Initializing MCP authentication...");
 
-    // Try to load token from environment — blank env var after reading (I236)
+    // Try to load token from environment — blank env var after reading (I236).
+    // The blank is opt-out: stdio MCP clients (Claude Code, Codex CLI, etc.)
+    // cannot inject `_meta.authToken` per call, so the request handler at
+    // src/index.ts:446 needs `process.env.NLMCP_AUTH_TOKEN` to survive
+    // initialize() for those calls to authenticate. Set NLMCP_AUTH_KEEP_ENV
+    // =true in those deployments. Default false preserves the credential-
+    // isolation behaviour that suits HTTP/SSE deployments.
+    const keepEnv = parseBoolean(process.env.NLMCP_AUTH_KEEP_ENV, false);
     if (this.config.token) {
       this.tokenHash = this.hashToken(this.config.token);
       this.config.token = undefined;
-      delete process.env.NLMCP_AUTH_TOKEN;
-      log.success("  ✅ Using token from environment variable");
+      if (!keepEnv) delete process.env.NLMCP_AUTH_TOKEN;
+      log.success(
+        `  ✅ Using token from environment variable${keepEnv ? " (kept in env for per-call fallback)" : ""}`,
+      );
       if (this.config.readOnlyToken) {
         this.readOnlyTokenHash = this.hashToken(this.config.readOnlyToken);
         this.config.readOnlyToken = undefined;
-        delete process.env.NLMCP_AUTH_READONLY_TOKEN;
+        if (!keepEnv) delete process.env.NLMCP_AUTH_READONLY_TOKEN;
         log.success("  ✅ Using read-only token from environment variable");
       }
       this.initialized = true;
@@ -168,7 +177,7 @@ export class MCPAuthenticator {
     if (this.config.readOnlyToken) {
       this.readOnlyTokenHash = this.hashToken(this.config.readOnlyToken);
       this.config.readOnlyToken = undefined;
-      delete process.env.NLMCP_AUTH_READONLY_TOKEN;
+      if (!keepEnv) delete process.env.NLMCP_AUTH_READONLY_TOKEN;
       log.success("  ✅ Using read-only token from environment variable");
     }
 
