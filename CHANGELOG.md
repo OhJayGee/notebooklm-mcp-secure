@@ -5,6 +5,105 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026.3.8] - 2026-05-17
+
+### Stdio transport-auth — a principled fix for the stdio-auth gap
+
+v2026.3.7 introduced `NLMCP_AUTH_KEEP_ENV` as a quick fix: keep
+`NLMCP_AUTH_TOKEN` in `process.env` so the per-call fallback at
+`src/index.ts:446` resolves to the configured token. It works, but
+leaves the bearer token sitting in the subprocess env for the lifetime
+of the process — visible to any `spawn()` inheritance, any diagnostic
+dump of `process.env`, any third-party library that reads env.
+
+This release adds the principled alternative: **the parent process
+proves knowledge of the token at startup, the server records that the
+stdio connection is trusted, scrubs the env unconditionally, and the
+per-call auth check short-circuits to authenticated.** The threat model
+matches reality: for stdio transport, the pipe between parent and child
+IS the trust boundary — only the spawning parent can write to that FD,
+and re-validating a token per call adds no security against any
+attacker the design defends against.
+
+**New env flags:**
+- `NLMCP_STDIO_TRANSPORT_AUTH=true` — opt in to the trusted-stdio
+  model. Requires `NLMCP_AUTH_TOKEN` to be present at startup (init
+  refuses otherwise). Requires `NLMCP_AUTH_DISABLED=true` to NOT be
+  set (init refuses otherwise). Default scope: admin.
+- `NLMCP_STDIO_TRANSPORT_AUTH_SCOPE=read` — optional downgrade. Trust
+  the connection but pin to read-only scope; admin-scope tool calls
+  are rejected with `insufficient_scope`. Valid values: `admin`
+  (default) or `read`. Init rejects any other value.
+
+**Trust model.** With `NLMCP_STDIO_TRANSPORT_AUTH=true`:
+- At `initialize()`: env token is hashed (validation pre-condition),
+  trust flag is set in-memory, both `NLMCP_AUTH_TOKEN` and
+  `NLMCP_AUTH_READONLY_TOKEN` are deleted from `process.env`.
+- On every subsequent tool call: the auth check short-circuits at the
+  start of `validateTokenScope()`, returning `{ valid: true, scope:
+  <configured> }` without inspecting the per-call token argument.
+- The trust flag is in-memory only; it dies with the process. A
+  restart re-runs init and re-validates that the parent still has the
+  token.
+- `NLMCP_AUTH_KEEP_ENV` is overridden: transport-auth scrubs env
+  unconditionally because the trust no longer depends on the env-var
+  fallback surviving.
+
+**Relationship to v2026.3.7's `NLMCP_AUTH_KEEP_ENV`.** Both flags
+remain functional. Stdio deployments SHOULD prefer
+`NLMCP_STDIO_TRANSPORT_AUTH` — same operational fix without the
+env-leak surface. `NLMCP_AUTH_KEEP_ENV` is retained as an escape hatch
+for unusual deployments (e.g., a custom stdio MCP client that does
+inject `_meta.authToken` but wants env-fallback for debugging).
+
+**Per-site map (src/auth/mcp-auth.ts):**
+- New private fields on `MCPAuthenticator`: `connectionTrusted: boolean`
+  and `connectionTrustedScope: MCPAuthScope`.
+- `initialize()`: new validation block at the top — reject misconfig
+  combos with clear errors. Token-loading branch now scrubs env
+  unconditionally when transport-auth is on (overriding keepEnv).
+- `validateTokenScope()`: new short-circuit after the lockout check,
+  honouring the scope-downgrade pin.
+
+**Tests added (`tests/mcp-auth.test.ts`):** 8 new tests covering:
+- env scrubbed AND `connectionTrusted` set when flag enabled
+- transport-auth wins over keep-env (env still scrubbed)
+- SCOPE=read pin allows read-scope calls, rejects admin-scope calls
+  with `insufficient_scope`
+- explicit SCOPE=admin works identically to default
+- flag without token → init throws (clear error message)
+- flag with auth disabled → init throws (clear error message)
+- invalid SCOPE value → init throws (clear error message)
+- flag unset → connectionTrusted stays false, per-call auth required
+
+**Deployment migration.** For users on v2026.3.7 with
+`NLMCP_AUTH_KEEP_ENV: "true"`, swap to:
+
+```json
+"env": {
+  "NLMCP_AUTH_TOKEN": "...",
+  "NLMCP_STDIO_TRANSPORT_AUTH": "true"
+}
+```
+
+For cautious deployments wanting read-only scope:
+
+```json
+"env": {
+  "NLMCP_AUTH_TOKEN": "...",
+  "NLMCP_STDIO_TRANSPORT_AUTH": "true",
+  "NLMCP_STDIO_TRANSPORT_AUTH_SCOPE": "read"
+}
+```
+
+### Build
+
+- `dist/` rebuilt against current `src/`.
+- `npx tsc --noEmit` — clean.
+- Test count: **845 → 853** (+8 new tests).
+
+---
+
 ## [2026.3.7] - 2026-05-17
 
 ### Fix — stdio MCP clients can finally authenticate
