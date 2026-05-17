@@ -55,6 +55,9 @@ describe("MCPAuthenticator", () => {
     delete process.env.NLMCP_AUTH_READONLY_TOKEN;
     delete process.env.NLMCP_AUTH_DISABLED;
     delete process.env.NLMCP_AUTH_ENABLED;
+    delete process.env.NLMCP_AUTH_KEEP_ENV;
+    delete process.env.NLMCP_STDIO_TRANSPORT_AUTH;
+    delete process.env.NLMCP_STDIO_TRANSPORT_AUTH_SCOPE;
   });
 
   afterEach(() => {
@@ -209,6 +212,105 @@ describe("MCPAuthenticator", () => {
       } finally {
         delete process.env.NLMCP_AUTH_KEEP_ENV;
       }
+    });
+
+    // ──────────────────────────────────────────────────────────────────
+    // v2026.3.8 — NLMCP_STDIO_TRANSPORT_AUTH
+    // ──────────────────────────────────────────────────────────────────
+    //
+    // Trust model: for stdio transport, the pipe IS the trust boundary.
+    // If the parent process proved knowledge of the token at startup,
+    // every subsequent message on that pipe is by definition from the
+    // same trusted parent. Per-call re-validation adds no security but
+    // breaks naive stdio clients. Default scope is admin; `…_SCOPE=read`
+    // pins trust to read-only.
+
+    it("STDIO_TRANSPORT_AUTH=true — env scrubbed AND connectionTrusted set", async () => {
+      process.env.NLMCP_AUTH_TOKEN = "stdio-auth-token";
+      process.env.NLMCP_STDIO_TRANSPORT_AUTH = "true";
+      const auth = new MCPAuthenticator({ tokenFile, token: "stdio-auth-token" });
+      await auth.initialize();
+      // Env is scrubbed unconditionally in transport-auth mode.
+      expect(process.env.NLMCP_AUTH_TOKEN).toBeUndefined();
+      // Subsequent auth check requires no token: trust short-circuit.
+      const result = await auth.validateTokenScope(undefined, "c1", "admin", true);
+      expect(result.valid).toBe(true);
+      expect(result.scope).toBe("admin");
+    });
+
+    it("STDIO_TRANSPORT_AUTH=true + KEEP_ENV=true — transport-auth wins, env still scrubbed", async () => {
+      process.env.NLMCP_AUTH_TOKEN = "both-flags";
+      process.env.NLMCP_STDIO_TRANSPORT_AUTH = "true";
+      process.env.NLMCP_AUTH_KEEP_ENV = "true";
+      const auth = new MCPAuthenticator({ tokenFile, token: "both-flags" });
+      await auth.initialize();
+      expect(process.env.NLMCP_AUTH_TOKEN).toBeUndefined();
+    });
+
+    it("STDIO_TRANSPORT_AUTH=true + SCOPE=read — trust pinned to read", async () => {
+      process.env.NLMCP_AUTH_TOKEN = "read-scoped";
+      process.env.NLMCP_STDIO_TRANSPORT_AUTH = "true";
+      process.env.NLMCP_STDIO_TRANSPORT_AUTH_SCOPE = "read";
+      const auth = new MCPAuthenticator({ tokenFile, token: "read-scoped" });
+      await auth.initialize();
+
+      const readCall = await auth.validateTokenScope(undefined, "c1", "read", false);
+      expect(readCall).toEqual({ valid: true, scope: "read" });
+
+      const adminCall = await auth.validateTokenScope(undefined, "c1", "admin", true);
+      expect(adminCall.valid).toBe(false);
+      expect(adminCall.scope).toBe("read");
+      expect(adminCall.error).toBe("insufficient_scope");
+    });
+
+    it("STDIO_TRANSPORT_AUTH=true with explicit SCOPE=admin works identically to default", async () => {
+      process.env.NLMCP_AUTH_TOKEN = "explicit-admin";
+      process.env.NLMCP_STDIO_TRANSPORT_AUTH = "true";
+      process.env.NLMCP_STDIO_TRANSPORT_AUTH_SCOPE = "admin";
+      const auth = new MCPAuthenticator({ tokenFile, token: "explicit-admin" });
+      await auth.initialize();
+      const result = await auth.validateTokenScope(undefined, "c1", "admin", true);
+      expect(result).toEqual({ valid: true, scope: "admin" });
+    });
+
+    it("STDIO_TRANSPORT_AUTH=true without a token throws at init", async () => {
+      process.env.NLMCP_STDIO_TRANSPORT_AUTH = "true";
+      const auth = new MCPAuthenticator({ tokenFile });
+      await expect(auth.initialize()).rejects.toThrow(
+        /NLMCP_AUTH_TOKEN to be set in env at startup/,
+      );
+    });
+
+    it("STDIO_TRANSPORT_AUTH=true with auth disabled throws at init", async () => {
+      process.env.NLMCP_AUTH_TOKEN = "any";
+      process.env.NLMCP_STDIO_TRANSPORT_AUTH = "true";
+      const auth = new MCPAuthenticator({
+        tokenFile,
+        token: "any",
+        enabled: false,
+      });
+      await expect(auth.initialize()).rejects.toThrow(
+        /requires MCP auth to be enabled/,
+      );
+    });
+
+    it("STDIO_TRANSPORT_AUTH=true with invalid SCOPE value throws at init", async () => {
+      process.env.NLMCP_AUTH_TOKEN = "any";
+      process.env.NLMCP_STDIO_TRANSPORT_AUTH = "true";
+      process.env.NLMCP_STDIO_TRANSPORT_AUTH_SCOPE = "superuser";
+      const auth = new MCPAuthenticator({ tokenFile, token: "any" });
+      await expect(auth.initialize()).rejects.toThrow(
+        /must be 'admin' or 'read'/,
+      );
+    });
+
+    it("STDIO_TRANSPORT_AUTH unset — connectionTrusted stays false; per-call auth required", async () => {
+      process.env.NLMCP_AUTH_TOKEN = "no-trust";
+      const auth = new MCPAuthenticator({ tokenFile, token: "no-trust" });
+      await auth.initialize();
+      const noToken = await auth.validateTokenScope(undefined, "c1", "admin", true);
+      expect(noToken.valid).toBe(false);
+      expect(noToken.error).toBe("no_token");
     });
   });
 
