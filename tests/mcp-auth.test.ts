@@ -149,6 +149,67 @@ describe("MCPAuthenticator", () => {
       expect(content).not.toBe(nonHex);
       expect(content).toMatch(/^[0-9a-f]{64}$/);
     });
+
+    // ──────────────────────────────────────────────────────────────────
+    // v2026.3.7 — NLMCP_AUTH_KEEP_ENV opt-out for the env-var delete
+    // ──────────────────────────────────────────────────────────────────
+    //
+    // Stdio MCP clients (Claude Code, Codex CLI) cannot inject
+    // `_meta.authToken` per call, so the request handler at
+    // src/index.ts:446 needs `process.env.NLMCP_AUTH_TOKEN` to survive
+    // initialize(). The flag preserves it; default behaviour still
+    // scrubs the env for credential-isolation (I236).
+
+    it("default — NLMCP_AUTH_TOKEN is scrubbed from env after initialize()", async () => {
+      process.env.NLMCP_AUTH_TOKEN = "stdio-token-default";
+      const auth = new MCPAuthenticator({ tokenFile, token: "stdio-token-default" });
+      await auth.initialize();
+      expect(process.env.NLMCP_AUTH_TOKEN).toBeUndefined();
+    });
+
+    it("NLMCP_AUTH_KEEP_ENV=true — env var survives so request-time fallback works", async () => {
+      process.env.NLMCP_AUTH_TOKEN = "stdio-token-keep";
+      process.env.NLMCP_AUTH_KEEP_ENV = "true";
+      try {
+        const auth = new MCPAuthenticator({ tokenFile, token: "stdio-token-keep" });
+        await auth.initialize();
+        expect(process.env.NLMCP_AUTH_TOKEN).toBe("stdio-token-keep");
+        expect(await auth.validateToken("stdio-token-keep", "c1")).toBe(true);
+      } finally {
+        delete process.env.NLMCP_AUTH_KEEP_ENV;
+      }
+    });
+
+    it("NLMCP_AUTH_KEEP_ENV=true also preserves NLMCP_AUTH_READONLY_TOKEN", async () => {
+      process.env.NLMCP_AUTH_TOKEN = "admin-keep";
+      process.env.NLMCP_AUTH_READONLY_TOKEN = "ro-keep";
+      process.env.NLMCP_AUTH_KEEP_ENV = "true";
+      try {
+        const auth = new MCPAuthenticator({
+          tokenFile,
+          token: "admin-keep",
+          readOnlyToken: "ro-keep",
+        });
+        await auth.initialize();
+        expect(process.env.NLMCP_AUTH_TOKEN).toBe("admin-keep");
+        expect(process.env.NLMCP_AUTH_READONLY_TOKEN).toBe("ro-keep");
+      } finally {
+        delete process.env.NLMCP_AUTH_KEEP_ENV;
+        delete process.env.NLMCP_AUTH_READONLY_TOKEN;
+      }
+    });
+
+    it("NLMCP_AUTH_KEEP_ENV=false (explicit) behaves like default — env scrubbed", async () => {
+      process.env.NLMCP_AUTH_TOKEN = "explicit-false";
+      process.env.NLMCP_AUTH_KEEP_ENV = "false";
+      try {
+        const auth = new MCPAuthenticator({ tokenFile, token: "explicit-false" });
+        await auth.initialize();
+        expect(process.env.NLMCP_AUTH_TOKEN).toBeUndefined();
+      } finally {
+        delete process.env.NLMCP_AUTH_KEEP_ENV;
+      }
+    });
   });
 
   describe("validateToken", () => {
