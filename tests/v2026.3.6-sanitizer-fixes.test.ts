@@ -183,7 +183,7 @@ describe("v2026.3.6 runtime: compliance dispatcher sanitizes leaked path + stack
     expect(text).toMatch(/Error executing compliance_dashboard/);
 
     // Absolute path stripped → replaced by `[path]`
-    expect(text).not.toContain("/Users/leak/private/path.ts");
+    expect(text).not.toContain("/Users/leak/private/notes.json");
     expect(text).toContain("[path]");
 
     // Stack-frame fragment stripped
@@ -196,7 +196,7 @@ describe("v2026.3.6 runtime: compliance dispatcher sanitizes leaked path + stack
     expect(auditCall).toBeDefined();
     const auditErrorArg = auditCall?.[4] as string | undefined;
     expect(auditErrorArg).toBeDefined();
-    expect(auditErrorArg).not.toContain("/Users/leak/private/path.ts");
+    expect(auditErrorArg).not.toContain("/Users/leak/private/notes.json");
     expect(auditErrorArg).not.toMatch(/at\s+\S+\s+\(\S+:\d+:\d+\)/);
   });
 });

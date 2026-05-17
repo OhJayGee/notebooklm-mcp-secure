@@ -53,7 +53,7 @@ work has been relocated to the new file above.
 
 - `dist/` rebuilt against current `src/`.
 - `npx tsc --noEmit` — clean.
-- Test count: **837 → 845** (+8 new tests).
+- Test count: **837 → 841** (+4 net).
 
 ---
 
