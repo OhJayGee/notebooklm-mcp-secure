@@ -5,6 +5,84 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026.3.10] - 2026-05-28
+
+### Fix — bin shim and npx invocation no longer silently exit
+
+Cherry-picks upstream commit `87feda7` (Ross Churchill, Pantheon-
+Security/notebooklm-mcp-secure v2026.3.3, closes upstream #11). The bug
+has been latent across the entire `@ohjaygee` fork lineage (v2026.3.0
+through v2026.3.9) because the divergence point with upstream was its
+v2026.3.2 release, immediately before this fix landed.
+
+**The bug.** The entry-point guard at the bottom of `src/index.ts`
+compared `import.meta.url` against a raw `pathToFileURL(process.argv[1])
+.href`:
+
+```ts
+const isDirectRun = process.argv[1]
+  ? import.meta.url === pathToFileURL(process.argv[1]).href
+  : false;
+```
+
+When the package is invoked via the **npm `bin` shim**
+(`node_modules/.bin/notebooklm-mcp`) or **`npx`**, `argv[1]` is the
+symlink the shim drops into place, not the real `dist/index.js` path.
+The comparison fails, `isDirectRun` is `false`, `main()` is never
+called, and the process exits cleanly with no MCP transport
+registered. From the MCP client's perspective, the server just refuses
+to come up — no error, no log, no diagnostic.
+
+**The fix.** Pass `argv[1]` through `realpathSync` before constructing
+the file URL, wrapped in a `try/catch` that fails closed
+(`isDirectRun = false`) on any resolution error:
+
+```ts
+const isDirectRun = (() => {
+  if (!process.argv[1]) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+})();
+```
+
+Adds an opt-in diagnostic log (`NLMCP_DEBUG=true`) that prints the
+`argv[1]` vs `import.meta.url` mismatch when the guard rejects — so
+the next time someone hits a comparable resolution edge case, they
+have a hook to investigate from.
+
+**Who this affects.** Anyone whose MCP client configuration runs the
+server via `npx @ohjaygee/notebooklm-mcp-secure` or via the
+`notebooklm-mcp` bin shim (i.e. anyone following the README's
+recommended Claude Code / Cursor / Codex configurations from a global
+npm install). Direct `node dist/index.js` invocations were unaffected
+because `argv[1]` is already the real path there.
+
+**Per-site map (`src/index.ts`):**
+- New import: `import { realpathSync } from "node:fs";`
+- `isDirectRun` rewritten as the IIFE shown above.
+- New `else if (process.argv[1] && process.env.NLMCP_DEBUG)` branch
+  that emits the diagnostic log line.
+
+**Provenance.** Cherry-picked with `git cherry-pick -x`, so the commit
+message preserves the upstream attribution and includes the
+`(cherry picked from commit 87feda7…)` trailer. No code edits beyond
+the cherry-pick itself.
+
+### Build
+
+- `dist/` rebuilt (entry-point guard change in `src/index.ts`).
+- `npx tsc --noEmit` — clean.
+- Test count: **853** (unchanged — no new tests; behaviour change is
+  in the module-loader interaction, which the test suite does not
+  exercise. Manual verification: `npx @ohjaygee/notebooklm-mcp-secure`
+  or invoking the bin shim from a global install now registers the
+  MCP transport instead of silent-exiting.)
+
+---
+
 ## [2026.3.9] - 2026-05-17
 
 ### Docs — bring all user-facing surfaces in line with v2026.3.8
